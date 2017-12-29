@@ -1,13 +1,13 @@
 {
-  "name": "ren",
-  "version": "1.0.0",
-  "description": "REN",
-  "main": "index.js",
+  "name": "remodeco",
+  "version": "0.0.1",
+  "description": "Rename Modify Delete Copy - edit your files like a text file",
+  "main": "bin/remodeco",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1"
   },
-  "author": "",
-  "license": "ISC",
+  "author": "Ivan Pantic",
+  "license": "MIT",
   "dependencies": {
     "@ronomon/opened": "^1.3.1",
     "open-in-editor": "^2.2.0",

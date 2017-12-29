@@ -1,3 +1,369 @@
 #!/usr/bin/env node
 
-console.log('Hello');
+const libOS = require('os');
+const libPath = require('path');
+const libFs = require('fs');
+
+const opened = require('@ronomon/opened');
+const readdirPlus = require('readdir-plus');
+const yargs = require('yargs');
+const openInEditor = require('open-in-editor');
+const tmpFile = require('tmp');
+
+main(process.argv);
+
+// *********************************************************************************************************************
+
+const OP_TYPES = {
+	R: 'R',
+	D: 'D',
+	C: 'C',
+};
+
+function main() {
+	const args = parseCommandLineArgs();
+
+	return generateEditList(args, (err, editList) => {
+		if (err) {
+			return fatal(err);
+		}
+
+		if (!editList.length) {
+			console.log(`No eligible files were found`);
+			return;
+		}
+
+		return createTempFile(editList, (err, tempPath, cleanup) => {
+			if (err) {
+				return fatal(err);
+			}
+
+			const fatalAndCleanup = err => {
+				cleanup();
+				fatal(err);
+			};
+
+			return editFile(tempPath, err => {
+				if (err) {
+					return fatalAndCleanup(err);
+				}
+
+				return loadOps(editList, tempPath, (err, ops) => {
+					if (err) {
+						return fatalAndCleanup(err);
+					}
+
+					const invalidOps = ops.filter(op => !op.valid);
+					if (invalidOps.length) {
+						const lines = invalidOps
+							.map(op => `${op.index}: ${op.line}`)
+							.join(`\n`);
+						return fatalAndCleanup(`Invalid lines:\n${lines}`);
+					}
+
+					if (ops.length !== editList.length) {
+						return fatalAndCleanup(`Length mismatch. Expected ${editList.length} lines, got ${ops.length}`);
+					}
+
+					return executeOps(ops, (err, report) => {
+						cleanup();
+						if (err) {
+							return fatal(err);
+						}
+
+						if (!report.changes) {
+							console.log(`No changes were made`);
+							return;
+						}
+
+						// TODO changes
+					});
+				});
+			});
+		});
+	});
+}
+
+function loadFileAsLines(path, callback) {
+	return libFs.readFile(path, 'utf8', (err, txt) => {
+		if (err) {
+			return callback(err);
+		}
+
+		const lines = txt.split(/\r\n|\n\r|\n|\r/g);
+
+		return callback(null, lines);
+	});
+}
+
+/**
+ * @callback opsCallback
+ * @param err
+ * @param {Op[]} ops
+ */
+/**
+ * @param originalList
+ * @param tempFilePath
+ * @param {opsCallback} callback
+ */
+function loadOps(originalList, tempFilePath, callback) {
+	return loadFileAsLines(tempFilePath, (err, changedList) => {
+		if (err) {
+			return callback(err);
+		}
+
+		const blankRegex = /^[\s#]*$/;
+
+		let originalIndex = 0;
+		const ops = [];
+		changedList.forEach((line, index) => {
+			if (!line || line.match(blankRegex)) {
+				// Empty line
+				return;
+			}
+
+			const op = /** @lends Op.prototype */ {
+				index,
+				line,
+				valid: false,
+				type: null,
+				to: null,
+				from: null
+			};
+
+			const match = /^\s*(#*)\s*(([RrDdCc]?\s)\s*(\S+)|(EXECUTE!)[\s#]?)/.exec(line);
+			if (!match) {
+				return ops.push(op);
+			}
+
+			if (match[1]) {
+				// Commented out
+				return;
+			}
+
+			if (match[5] === 'EXECUTE!') {
+				// Execute line, ignore
+				return;
+			}
+
+			op.valid = true;
+			op.type = OP_TYPES[match[3].toUpperCase().trim()] || OP_TYPES.R;
+			op.to = match[4];
+			op.from = originalList[originalIndex];
+			originalIndex++;
+			return ops.push(op);
+		});
+
+		return callback(null, ops);
+	});
+}
+
+/**
+ * @param {Op[]} ops
+ * @param callback
+ */
+function executeOps(ops, callback) {
+	const commands = ops.map(op => {
+		switch (op.type) {
+			case OP_TYPES.R:
+				return `mv ${op.from} ${op.to}`;
+			case OP_TYPES.C:
+				return `cp ${op.from} ${op.to}`;
+			case OP_TYPES.D:
+				return `rm ${op.from}`;
+		}
+	});
+	console.log(commands.join('\n'));
+	callback(null, {
+		changes: 0
+	});
+}
+
+function editFile(path, callback) {
+	let error = null;
+	const editor = openInEditor.configure({}, (err) => {
+		error = err;
+	});
+	if (error) {
+		return callback(error);
+	}
+
+	return editor.open(path).then(
+		waitForEditToEnd,
+		err => callback(err)
+	);
+
+	function waitForEditToEnd() {
+		console.log(`Editing is in progress. Uncomment the EXECUTE line and save the file to trigger the changes`);
+
+		let _stopSignal = false;
+		let _checkQueued = null;
+
+		const watcher = libFs.watch(path, checkIfExecuteIsTriggered);
+
+		const _openedInterval = setInterval(checkIfOpened, 500);
+
+		function checkIfOpened() {
+			opened.file(path, (err, opened) => {
+				if (_stopSignal) {
+					return;
+				}
+
+				if (err || !opened) {
+					// User has closed the file, trigger the end.
+					done(err);
+				}
+			});
+		}
+
+		function checkIfExecuteIsTriggered() {
+			if (_stopSignal) {
+				return;
+			}
+
+			if (_checkQueued !== null) {
+				// Still waiting on callback
+				_checkQueued = true;
+				return;
+			}
+
+			return doCheckIfExecuteIsTriggered(path, (err, execute) => {
+				if (_stopSignal) {
+					return;
+				}
+
+				if (_checkQueued === true) {
+					// Need to check again, discard this
+					_checkQueued = false;
+					return checkIfExecuteIsTriggered();
+				}
+				_checkQueued = null;
+
+				if (err) {
+					return done(err);
+				}
+
+				if (execute) {
+					// Wait is done.
+					done(null);
+				}
+			});
+		}
+
+		function doCheckIfExecuteIsTriggered(path, callback) {
+			loadFileAsLines(path, (err, lines) => {
+				if (err) {
+					return callback(err);
+				}
+
+				for (let i = lines.length - 1; i >= 0; i--) {
+					const match = /^\s*(#*)\s*EXECUTE!(\s|#)?/.exec(lines[i]);
+					if (match) {
+						const execute = !match[1]; // We haven't matched any #-s
+						return callback(null, execute);
+					}
+				}
+
+				// We haven't found any EXECUTE lines
+				return callback(null, false);
+			});
+		}
+
+		function done(err) {
+			if (_stopSignal) {
+				return;
+			}
+
+			_stopSignal = true;
+			_checkQueued = null;
+			watcher.close();
+			clearInterval(_openedInterval);
+
+			callback(err);
+		}
+	}
+}
+
+/**
+ * @param {Args} args
+ * @param callback
+ */
+function generateEditList(args, callback) {
+	return readdirPlus(args.path, {recursive: args.recursive}, (err, list) => {
+		if (err) {
+			return callback(err);
+		}
+
+		const editList = list.map(item => item.path);
+
+		return callback(null, editList);
+	});
+}
+
+function createTempFile(editList, callback) {
+	const content = `##
+## To perform operations, modify this list of files to desired names.
+## Changes are mapped line for line. You can add empty lines, but don't rearrange the list!
+##
+## First letter in each line represents the operation. Supported ops:
+##   R: Rename
+##   C: Copy
+##   D: Delete (this operation ignores the name you enter afterwards, it can be anything)
+## Empty space is treated as "R", which is the default op.
+##
+## When done, uncomment the EXECUTE! line at the end and save. To cancel, just close this file and the utility.
+## 
+
+${editList.map(line => ` ${line}`).join(libOS.EOL)}
+
+# EXECUTE! <-- when done, uncomment this line and save
+`;
+
+	return tmpFile.file({postfix: '.ini'}, (err, path, fd, cleanup) => {
+		if (err) {
+			return callback(err);
+		}
+
+		libFs.writeFile(path, content, 'utf8', (err) => {
+			if (err) {
+				cleanup();
+				return callback(err);
+			}
+
+			return callback(null, path, cleanup);
+		});
+	});
+}
+
+/**
+ * @returns {Args}
+ */
+function parseCommandLineArgs() {
+	return yargs
+		.default(/** @lends Args.prototype */ {
+			path: process.cwd(),
+			recursive : false,
+		})
+
+		.usage('Usage: $0 <path> [options]')
+		.example('$0 /tmp -r', 'Recursively load all files in the tmp folder')
+
+		.command('$0 [path]', '', (yargs) => {
+			yargs.positional('path', {
+				describe: 'The directory to work on, defaults to cwd'
+			})
+		})
+
+		.alias('r', 'recursive')
+		.describe('r', 'Load all subdirectories recursively')
+
+		.help('h')
+		.alias('h', 'help')
+
+		.argv;
+}
+
+function fatal(err) {
+	console.error(err);
+	process.exit(1);
+}

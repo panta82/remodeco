@@ -311,7 +311,7 @@ function createTempFile(editList, callback) {
 ##   D: Delete (this operation ignores the name you enter afterwards, it can be anything)
 ## Empty space is treated as "R", which is the default op.
 ##
-## When done, uncomment the EXECUTE! line at the end and save. To cancel, just close this file and the utility.
+## When done, uncomment the EXECUTE! line at the end and save. To cancel, just close this file and remodeco.
 ## 
 
 ${editList.map(line => ` ${line}`).join(libOS.EOL)}

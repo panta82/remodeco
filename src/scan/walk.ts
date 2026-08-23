@@ -1,7 +1,7 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import picomatch from 'picomatch'
-import { isRepresentablePath } from '../plan/representable.ts'
+import { unrepresentableReason } from '../plan/representable.ts'
 import { fingerprintFromStats, type SourceFingerprint } from './fingerprint.ts'
 
 export const DEFAULT_EXCLUDES = ['.git', 'node_modules', '.hg', '.svn']
@@ -55,8 +55,9 @@ export function scanTree(opts: {
   exclude: string[]
 }): ScanResult {
   const root = fs.realpathSync(opts.root)
-  if (!isRepresentablePath(root)) {
-    throw new ScanError('unrepresentable-root', `unrepresentable root path: ${root}`)
+  const rootWhy = unrepresentableReason(root)
+  if (rootWhy) {
+    throw new ScanError('unrepresentable-root', `unrepresentable root path (${rootWhy}): ${root}`)
   }
   const rows: ScanRow[] = []
   let skippedSpecial = 0
@@ -72,8 +73,9 @@ export function scanTree(opts: {
       const rawName = (ent as unknown as { name: Buffer }).name
       const name = typeof rawName === 'string' ? rawName : decodeName(Buffer.from(rawName))
       const abs = path.join(dir, name)
-      if (!isRepresentablePath(abs) || !isRepresentablePath(name)) {
-        throw new ScanError('unrepresentable', `unrepresentable path: ${abs}`)
+      const why = unrepresentableReason(abs) ?? unrepresentableReason(name)
+      if (why) {
+        throw new ScanError('unrepresentable', `unrepresentable path (${why}): ${abs}`)
       }
       const rel = abs.startsWith(root + path.sep) ? abs.slice(root.length + 1).split(path.sep).join('/') : name
       if (!opts.hidden && name.startsWith('.')) {

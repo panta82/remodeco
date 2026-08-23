@@ -37,6 +37,8 @@ Headings are labels only. Each file is:
 
 Do not `bash` this file. remodeco parses it and executes in-process.
 
+Filenames may contain backticks, `_`, and `<!--`; comments are whole lines (`Ctrl+/` wraps a bullet in `<!-- -->`), not a file-wide strip.
+
 Per-directory config: `{dir}/.remodeco.json`.
 
 ## Safety

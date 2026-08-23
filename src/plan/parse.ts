@@ -1,6 +1,6 @@
 import { ParseError, type ParsedBullet, type ParsedPlan, type PlanHeader } from './types.ts'
 export { ParseError } from './types.ts'
-import { isAbsolutePosix, isRepresentablePath } from './representable.ts'
+import { isAbsolutePosix, isLineSafePath } from './representable.ts'
 import { parseYamlSingleQuoted } from './frontMatter.ts'
 
 export const MAX_FILE_BYTES = 32 * 1024 * 1024
@@ -10,17 +10,23 @@ export const MAX_DEST_BYTES = 4096
 
 export const BULLET_RE = /^-\s+`\{(\d+)\}`\t(.*)$/
 
-export function stripHtmlComments(input: string): string {
-  let out = ''
-  let i = 0
-  while (i < input.length) {
-    const start = input.indexOf('<!--', i)
-    if (start === -1) return out + input.slice(i)
-    out += input.slice(i, start)
-    const end = input.indexOf('-->', start + 4)
-    if (end === -1) throw new ParseError('unterminated-html-comment')
-    i = end + 3
+/** Line-oriented comments so dests may contain `<!--` / backticks. */
+export function dropCommentLines(lines: string[]): string[] {
+  const out: string[] = []
+  let inBlock = false
+  for (const line of lines) {
+    if (inBlock) {
+      if (line.includes('-->')) inBlock = false
+      continue
+    }
+    const t = line.trimStart()
+    if (t.startsWith('<!--')) {
+      if (!t.includes('-->')) inBlock = true
+      continue
+    }
+    out.push(line)
   }
+  if (inBlock) throw new ParseError('unterminated-html-comment')
   return out
 }
 
@@ -41,8 +47,7 @@ export function parsePlan(raw: string, rawByteLength?: number): ParsedPlan {
     }
   }
 
-  const stripped = stripHtmlComments(raw)
-  const lines = splitRawLines(stripped)
+  const lines = dropCommentLines(rawLines)
 
   let header: PlanHeader | null = null
   let i = 0
@@ -88,7 +93,7 @@ export function parsePlan(raw: string, rawByteLength?: number): ParsedPlan {
       bullets.push({ id, destRaw, kind: 'trash', line: lineNo })
       continue
     }
-    if (!isRepresentablePath(destRaw) || !isAbsolutePosix(destRaw)) {
+    if (!isLineSafePath(destRaw) || !isAbsolutePosix(destRaw)) {
       throw new ParseError('bad-dest', `unrepresentable or non-absolute dest for {${id}}`)
     }
     bullets.push({ id, destRaw, kind: 'dest', line: lineNo })

@@ -1,8 +1,7 @@
 import { describe, expect, it } from 'vitest'
-import { parsePlan, stripHtmlComments, BULLET_RE } from '../src/plan/parse.ts'
+import { parsePlan, dropCommentLines, BULLET_RE, classifyOps, ParseError } from '../src/plan/parse.ts'
 import { generatePlanMd, idWidthForCount } from '../src/plan/generate.ts'
-import { classifyOps, ParseError } from '../src/plan/parse.ts'
-import { isRepresentablePath } from '../src/plan/representable.ts'
+import { isLineSafePath } from '../src/plan/representable.ts'
 
 describe('BULLET_RE', () => {
   it('requires a tab', () => {
@@ -12,12 +11,15 @@ describe('BULLET_RE', () => {
   })
 })
 
-describe('stripHtmlComments', () => {
-  it('strips one comment', () => {
-    expect(stripHtmlComments('a<!-- x -->b')).toBe('ab')
+describe('dropCommentLines', () => {
+  it('drops a Ctrl+/ wrapped line', () => {
+    expect(dropCommentLines(['keep', '<!-- - `{1}`\t/p -->', 'also'])).toEqual(['keep', 'also'])
   })
-  it('fails unterminated', () => {
-    expect(() => stripHtmlComments('a<!-- x')).toThrow(ParseError)
+  it('does not eat dests that contain <!--', () => {
+    expect(dropCommentLines(['- `{1}`\t/foo/<!--bar.mp3'])).toEqual(['- `{1}`\t/foo/<!--bar.mp3'])
+  })
+  it('fails unterminated block', () => {
+    expect(() => dropCommentLines(['<!--', 'still'])).toThrow(ParseError)
   })
 })
 
@@ -91,10 +93,26 @@ describe('generatePlanMd', () => {
   })
 })
 
-describe('representable', () => {
-  it('rejects trailing space and comments', () => {
-    expect(isRepresentablePath('/tmp/a ')).toBe(false)
-    expect(isRepresentablePath('/tmp/a<!--b')).toBe(false)
-    expect(isRepresentablePath('/tmp/a')).toBe(true)
+describe('line-safe paths', () => {
+  it('allows backticks, comments, trailing space; rejects NUL/CR/LF', () => {
+    expect(isLineSafePath("/tmp/You`ve.mp3")).toBe(true)
+    expect(isLineSafePath('/tmp/a<!--b')).toBe(true)
+    expect(isLineSafePath('/tmp/a ')).toBe(true)
+    expect(isLineSafePath('/tmp/a')).toBe(true)
+    expect(isLineSafePath('/tmp/a\n')).toBe(false)
+  })
+})
+
+describe('backtick dest', () => {
+  it('round-trips a dest with a grave accent', () => {
+    const from = "/tmp/r/You`ve Made Me So Very Happy.mp3"
+    const md = generatePlanMd({
+      sessionId: 's',
+      root: '/tmp/r',
+      idWidth: 1,
+      rows: [{ id: 1, from }],
+    })
+    const p = parsePlan(md)
+    expect(p.bullets[0].destRaw).toBe(from)
   })
 })

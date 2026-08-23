@@ -142,11 +142,23 @@ export async function launchEditor(config: AppConfig, planPath: string): Promise
     return
   }
   const mux = multiplexer()
-  if (mux && spawnMux(mux, ed.argv, planPath)) return
+  if (mux && spawnMux(mux, ed.argv, planPath)) {
+    console.error(`Opened ${path.basename(ed.argv[0])} in another pane. Edit, save, then Execute here ([e]).`)
+    console.error(`Plan: ${planPath}`)
+    return
+  }
   await attachAndWait(ed.argv, planPath)
 }
 
+function printCliEditorHint(argv: string[], planPath: string): void {
+  const name = path.basename(argv[0])
+  console.error(`Opening ${name}. Save and quit to return to the remodeco preview.`)
+  console.error(`You can press o later to edit the plan again.`)
+  console.error(`Plan: ${planPath}`)
+}
+
 export function attachAndWait(argv: string[], planPath: string): Promise<number> {
+  printCliEditorHint(argv, planPath)
   return new Promise((resolve) => {
     const child = spawn(argv[0], [...argv.slice(1), planPath], {
       stdio: 'inherit',

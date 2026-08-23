@@ -1,48 +1,79 @@
 # remodeco
 
-Review file renames (or copies) in your editor, preview a live diff in the terminal, then execute.
+Review file renames (or copies) in your editor, preview a live diff in the
+terminal, then execute them safely.
 
-Linux and macOS. Node 20+.
+Remodeco is a single, fast-starting Rust executable for Linux and macOS.
 
-```
-npm i -g remodeco
+```sh
+cargo install --path .
 remodeco /path/to/dir
 ```
 
-Or `npx remodeco /path/to/dir`.
-
 ## Flow
 
-1. Scans the directory into a session under `~/.local/share/remodeco/sessions/`.
-2. Writes `plan.md` (identity mapping: dest = original path).
-3. Opens the plan in `$EDITOR` (GUI detached, tmux/Kitty/WezTerm/Zellij sibling pane, else attach-and-wait).
-4. Ink TUI: `[e]` Execute, `[c]` Cancel, `[o]` Re-open editor.
+1. Remodeco scans the directory into a session under the platform data folder
+   (`~/.local/share/remodeco/sessions/` on Linux).
+2. It writes a Markdown `plan.md` whose destinations initially equal the source
+   paths.
+3. It opens the plan in your editor. GUI editors are detached; tmux, Zellij,
+   Kitty, and WezTerm can open a sibling pane; terminal editors attach and wait.
+4. A small inline terminal view shows the changed paths. It does not use an
+   alternate screen, so native scrollback and selection continue to work.
+5. Press `e` to execute, `o` to re-open the editor, or `c`/`q` to cancel.
 
-`--no-edit` skips the editor. `--dry-run` prints the schedule and does not mutate. `--copy` copies instead of moving.
+The preview uses `j`/`k`, arrow keys, and Page Up/Page Down when there are more
+changes than fit in the inline viewport. Set `NO_COLOR=1` for an unstyled view.
 
-## plan.md
+## `plan.md`
 
-Headings are labels only. Each file is:
+Headings are labels only. Each file is represented by one strict, tab-separated
+line:
 
 ```markdown
-- `{01}`	/abs/path/to/file.txt
+- `{01}`	/absolute/path/to/file.txt
 ```
 
 | Edit | Effect |
 | --- | --- |
-| Leave the path | no-op |
-| Change the full dest path | rename/move (or copy) |
-| Tab then empty dest | trash (XDG Trash / `~/.Trash`) |
-| Delete the line or `Ctrl+/` comment it | skip |
+| Leave the path unchanged | no operation |
+| Change the full destination path | rename/move (or copy) |
+| Leave the destination empty after the tab | move to desktop trash |
+| Delete the line or comment it with `Ctrl+/` | skip |
 
-Do not `bash` this file. remodeco parses it and executes in-process.
+Do not execute the Markdown as shell. Remodeco parses the file and performs the
+operations in-process. Filenames may contain backticks, underscores, spaces,
+and `<!--`; NUL, CR, LF, invalid UTF-8, and non-absolute destinations are
+rejected.
 
-Filenames may contain backticks, `_`, and `<!--`; comments are whole lines (`Ctrl+/` wraps a bullet in `<!-- -->`), not a file-wide strip.
+Per-directory configuration remains compatible with the rewrite branch and
+lives at `{dir}/.remodeco.json`. User configuration is `config.json` in the
+platform configuration directory.
 
-Per-directory config: `{dir}/.remodeco.json`.
+## Useful commands
+
+```sh
+remodeco . --dry-run
+remodeco --list-sessions
+remodeco --session SESSION_ID
+remodeco undo SESSION_ID
+```
+
+Run `remodeco --help` for scanning, editor, copy, and session options.
 
 ## Safety
 
-Parse-and-execute, never a shell. No-clobber rename (`renameat2` / `renamex_np`). Journal before mutation. Global execute lock.
+Plans are parsed rather than evaluated. File identities are captured during the
+scan and checked again immediately before mutation. Renames and copies never
+replace an existing destination. Destination parent identities are checked at
+execution time, each mutation is journaled, and a global lock serializes
+execution. Trash uses the freedesktop.org layout on Linux and `~/.Trash` on
+macOS.
+
+The persisted Markdown, manifest, session, and journal formats are compatible
+with sessions created by the TypeScript `rewrite` branch.
+
+See [ARCHITECTURE.md](ARCHITECTURE.md) for the terminal/diff decision and module
+layout.
 
 MIT. Ivan Pantic.

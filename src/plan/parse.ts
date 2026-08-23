@@ -77,6 +77,8 @@ export function parsePlan(raw: string, rawByteLength?: number): ParsedPlan {
     if (lineNo - 1 < i) continue
     if (text.trim() === '') continue
     if (/^#{1,6}\s/.test(text)) continue
+    if (/^>/.test(text.trimStart())) continue
+    if (/^---+$/.test(text.trim())) continue
     const m = BULLET_RE.exec(text)
     if (!m) {
       unknownLines.push({ line: lineNo, text })

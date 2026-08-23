@@ -22,6 +22,13 @@ export function generatePlanMd(opts: {
 }): string {
   const { sessionId, root, rows, idWidth } = opts
   const chunks: string[] = [emitFrontMatter(sessionId, root)]
+  chunks.push(`
+> Edit the path after \`{id}\` (the tab) to **rename/move**.
+> Leave a path unchanged = do nothing. Tab then empty dest = **trash**.
+> Delete a line, or \`Ctrl+/\` comment it, to **skip**.
+> Headings are labels only — they do not move files.
+> When done, Execute in the TUI (\`e\`).
+`)
   chunks.push(`# ${root}\n`)
 
   let curParent: string | null = null

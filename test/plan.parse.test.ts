@@ -90,6 +90,10 @@ describe('generatePlanMd', () => {
     expect(md).toContain('- `{01}`\t/tmp/r/a/one.txt')
     expect(md).toContain('## a')
     expect(md).toContain('## b')
+    expect(md).toContain('Edit the path after')
+    const p = parsePlan(md)
+    expect(p.unknownLines).toEqual([])
+    expect(p.bullets).toHaveLength(2)
   })
 })
 

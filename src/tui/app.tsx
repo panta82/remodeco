@@ -40,12 +40,12 @@ export function App(props: {
     }
   }, [session.planPath])
 
-  const shown = ops.filter((o) => {
+  const changes = ops.filter((o) => o.kind !== 'noop' && o.kind !== 'skip')
+  const shown = changes.filter((o) => {
     if (!filter) return true
     const q = filter.toLowerCase()
     return o.from.toLowerCase().includes(q) || o.to.toLowerCase().includes(q) || String(o.id).includes(q)
   })
-  const changes = ops.filter((o) => o.kind !== 'noop' && o.kind !== 'skip')
   const trash = ops.filter((o) => o.kind === 'trash')
 
   useInput((input, key) => {
@@ -110,6 +110,9 @@ export function App(props: {
       <Text>[e] Execute [c] Cancel [o] Re-open editor</Text>
       {confirmTrash ? <Text color="yellow">Trash ids {confirmTrash.join(', ')}? y/N</Text> : null}
       {status ? <Text color="cyan">{status}</Text> : null}
+      {changes.length === 0 ? (
+        <Text dimColor>No operations — edit the plan ([o]) to rename, move, or trash files.</Text>
+      ) : null}
       {rows.map((o) => {
         if (o.kind === 'trash') {
           return (

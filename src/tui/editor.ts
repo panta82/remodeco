@@ -32,11 +32,35 @@ export function tokenizeEditor(cmd: string): string[] {
   return out
 }
 
-export function resolveEditor(config: AppConfig): { argv: string[]; kind: 'gui' | 'tty' } | null {
+/** SSH login without VS Code Remote — do not auto-launch GUI editors. */
+export function isHeadlessRemote(env: NodeJS.ProcessEnv = process.env): boolean {
+  const ssh = Boolean(env.SSH_CONNECTION || env.SSH_CLIENT || env.SSH_TTY)
+  if (!ssh) return false
+  if (env.TERM_PROGRAM === 'vscode') return false
+  return true
+}
+
+export function resolveEditor(
+  config: AppConfig,
+  env: NodeJS.ProcessEnv = process.env,
+): { argv: string[]; kind: 'gui' | 'tty' } | null {
   let argv: string[] | undefined
-  if (Array.isArray(config.editor)) argv = config.editor
-  else if (typeof config.editor === 'string') argv = tokenizeEditor(config.editor)
-  if (!argv?.length) {
+  let explicit = false
+  if (Array.isArray(config.editor)) {
+    argv = config.editor
+    explicit = true
+  } else if (typeof config.editor === 'string') {
+    argv = tokenizeEditor(config.editor)
+    explicit = true
+  }
+  if (!argv?.length && env.VISUAL) {
+    argv = tokenizeEditor(env.VISUAL)
+  }
+  if (!argv?.length && env.EDITOR) {
+    argv = tokenizeEditor(env.EDITOR)
+  }
+  const allowGuiAuto = config.editorMode === 'gui' || (!isHeadlessRemote(env) && config.editorMode !== 'tty')
+  if (!argv?.length && allowGuiAuto) {
     for (const name of ['code', 'codium', 'subl', 'kate', 'gedit']) {
       if (which(name)) {
         argv = [name]
@@ -53,6 +77,9 @@ export function resolveEditor(config: AppConfig): { argv: string[]; kind: 'gui' 
   let kind: 'gui' | 'tty' = GUI.has(base) ? 'gui' : TTY_EDITORS.has(base) ? 'tty' : 'tty'
   if (config.editorMode === 'gui') kind = 'gui'
   if (config.editorMode === 'tty') kind = 'tty'
+  if (isHeadlessRemote(env) && kind === 'gui' && !explicit && config.editorMode === 'auto') {
+    kind = 'tty'
+  }
   return { argv, kind }
 }
 

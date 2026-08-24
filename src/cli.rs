@@ -6,7 +6,7 @@ use std::path::PathBuf;
 #[command(
     name = "remodeco",
     version,
-    about = "Review and execute file renames in your editor, with an inline terminal diff"
+    about = "Review and execute file renames in your editor, with a full-screen terminal diff"
 )]
 pub struct Cli {
     /// Directory to scan (defaults to the current directory).

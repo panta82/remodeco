@@ -27,7 +27,7 @@ Here's how it works:
 
 ![docs_diff.png](misc/docs_diff.png)
 
-6️⃣ Press `e` to execute, `o` to re-open the editor, or `c`/`q` to cancel.
+6️⃣ Press `e` to execute, `o` to re-open the editor, `r` to reset the plan, or `c`/`q` to cancel.
 
 If you accept the changes, your files will be renamed, copied, or moved to trash.
 

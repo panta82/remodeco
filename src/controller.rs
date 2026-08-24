@@ -149,6 +149,32 @@ pub fn refresh_hashes(session: &mut SessionRecord) -> Result<bool> {
     Ok(true)
 }
 
+pub fn reset_session_plan(session: &mut SessionRecord) -> Result<()> {
+    if session.active_journal_id.is_some() {
+        bail!("cannot reset a session with an active journal");
+    }
+    if session.status != SessionStatus::Draft {
+        bail!("can only reset a draft session");
+    }
+    let manifest = read_manifest(&session.id)?;
+    let plan = generate_plan(
+        &session.id,
+        &session.root,
+        &manifest.entries,
+        session.id_width,
+    );
+    write_plan(&session.id, &plan)?;
+    let whole = whole_file_hash(&plan);
+    session.generated_whole_file_hash = whole.clone();
+    session.whole_file_hash = whole;
+    session.body_hash = body_hash(&plan);
+    session.plan_body_diverged = false;
+    session.stats.changes = 0;
+    session.revision += 1;
+    write_session(session)?;
+    Ok(())
+}
+
 pub fn parse_session_plan(session: &SessionRecord) -> Result<Vec<Operation>> {
     parse_session_plan_at_hash(session, None)
 }
@@ -577,5 +603,51 @@ mod tests {
         assert!(error.to_string().contains("changed since confirmation"));
         assert!(source.exists());
         assert!(!Path::new(&destination).exists());
+    }
+
+    #[test]
+    fn reset_restores_original_plan_destinations() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let _restore = isolated_environment(&temp);
+        let root = temp.path().join("files");
+        fs::create_dir(&root).unwrap();
+        let source = root.join("a.txt");
+        fs::write(&source, "A").unwrap();
+        let mut opened = create_session(&root, SessionMode::Move, &config(), true).unwrap();
+        let original = fs::read_to_string(&opened.session.plan_path).unwrap();
+        let source_text = path_text(&source).unwrap();
+        let edited = original.replace(
+            &format!("\t{source_text}\n"),
+            &format!("\t{}\n", root.join("b.txt").display()),
+        );
+        fs::write(&opened.session.plan_path, edited).unwrap();
+        refresh_hashes(&mut opened.session).unwrap();
+        assert!(
+            parse_session_plan(&opened.session)
+                .unwrap()
+                .iter()
+                .any(|operation| operation.kind == OpKind::Move)
+        );
+
+        reset_session_plan(&mut opened.session).unwrap();
+        let operations = parse_session_plan(&opened.session).unwrap();
+        assert!(
+            operations
+                .iter()
+                .all(|operation| operation.kind == OpKind::Noop)
+        );
+        assert_eq!(
+            fs::read_to_string(&opened.session.plan_path).unwrap(),
+            generate_plan(
+                &opened.session.id,
+                &opened.session.root,
+                &read_manifest(&opened.session.id).unwrap().entries,
+                opened.session.id_width,
+            )
+        );
+
+        opened.session.status = SessionStatus::Executed;
+        assert!(reset_session_plan(&mut opened.session).is_err());
     }
 }

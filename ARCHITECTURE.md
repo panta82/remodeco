@@ -6,15 +6,19 @@ preserving the `rewrite` branch's Markdown plan and JSON session formats.
 ## Terminal and diff decision
 
 Remodeco uses Ratatui with Crossterm, the same basic terminal stack used by the
-Rust Codex and Grok CLIs. Unlike those applications, it deliberately uses
-Ratatui's **inline viewport** and never enters the terminal's alternate screen.
-The preview therefore remains a small part of an ordinary shell session: native
-scrollback, selection, multiplexers, and basic terminals keep working normally.
+Rust Codex and Grok CLIs. The confirmation view is a **fullscreen** TUI on the
+terminal's alternate screen (`smcup` / `rmcup`), the same model as `htop`,
+`less`, and GNU `dialog`. While the preview is open it owns the whole visible
+window; on exit, panic, or re-opening the editor, it leaves the alternate
+screen and restores the previous terminal contents.
 
 The preview is not a source-code unified diff. It compares an original path with
 an edited destination. `similar` supplies a Myers sequence diff over path-aware
-tokens, rendered as compact `- old` / `+ new` rows. Styling is restricted to
-basic red, green, bold, and dim attributes and is disabled by `NO_COLOR`.
+tokens, rendered as a single inline line (red/strikethrough deletions next to
+green insertions). Files are grouped under blue directory headers, with
+zero-padded numeric prefixes aligned to the plan's id width. Styling is
+restricted to basic colors, bold, dim, and strikethrough, and is disabled by
+`NO_COLOR`.
 
 References used for the decision:
 
@@ -23,13 +27,13 @@ References used for the decision:
 - [Codex diff renderer](https://github.com/openai/codex/blob/main/codex-rs/tui/src/diff_render.rs)
   uses Ratatui spans and `diffy` for full unified source diffs.
 - [Grok Build](https://github.com/xai-org/grok-build) is likewise a Rust
-  Ratatui/Crossterm application, but is designed around a full-screen agent UI.
+  Ratatui/Crossterm application designed around a full-screen agent UI.
 - [Ratatui viewport documentation](https://docs.rs/ratatui/latest/ratatui/enum.Viewport.html)
-  defines `Inline` specifically for a UI embedded in ordinary CLI output.
+  defines `Fullscreen` as the default viewport for an application that owns the
+  terminal window.
 
-If a terminal does not answer the cursor-position query needed by Ratatui's
-inline viewport, Remodeco falls back to a line-oriented prompt with the same
-execute/editor/cancel flow. It never switches to an alternate screen.
+If raw mode or the alternate screen cannot be entered, Remodeco falls back to a
+line-oriented prompt with the same execute/editor/cancel flow.
 
 ## Modules
 
@@ -39,7 +43,7 @@ execute/editor/cancel flow. It never switches to an alternate screen.
 - `schedule`: validate operations and order mkdir/stage/commit/copy/trash steps.
 - `execute`: journal-before-mutation execution, desktop trash, and undo.
 - `editor`: editor discovery and GUI/multiplexer/attached editor lifecycle.
-- `tui`: inline diff preview and the small execute/cancel/re-open interaction.
+- `tui`: fullscreen alternate-screen diff preview and execute/cancel/re-open.
 
 ## Safety invariants
 

@@ -14,25 +14,37 @@ pub struct DiffPart {
 }
 
 pub fn path_diff(before: &str, after: &str) -> (Vec<DiffPart>, Vec<DiffPart>) {
+    let mut before_parts = Vec::new();
+    let mut after_parts = Vec::new();
+    for part in path_diff_inline(before, after) {
+        match part.tag {
+            DiffTag::Equal => {
+                push_merged(&mut before_parts, DiffTag::Equal, &part.text);
+                push_merged(&mut after_parts, DiffTag::Equal, &part.text);
+            }
+            DiffTag::Delete => push_merged(&mut before_parts, DiffTag::Delete, &part.text),
+            DiffTag::Insert => push_merged(&mut after_parts, DiffTag::Insert, &part.text),
+        }
+    }
+    (before_parts, after_parts)
+}
+
+pub fn path_diff_inline(before: &str, after: &str) -> Vec<DiffPart> {
     let old = tokenize(before);
     let new = tokenize(after);
     let mut config = TextDiff::configure();
     config.algorithm(Algorithm::Myers);
     let diff = config.diff_slices(&old, &new);
-    let mut before_parts = Vec::new();
-    let mut after_parts = Vec::new();
+    let mut parts = Vec::new();
     for change in diff.iter_all_changes() {
-        let text = (*change.value()).to_owned();
-        match change.tag() {
-            ChangeTag::Equal => {
-                push_merged(&mut before_parts, DiffTag::Equal, &text);
-                push_merged(&mut after_parts, DiffTag::Equal, &text);
-            }
-            ChangeTag::Delete => push_merged(&mut before_parts, DiffTag::Delete, &text),
-            ChangeTag::Insert => push_merged(&mut after_parts, DiffTag::Insert, &text),
-        }
+        let tag = match change.tag() {
+            ChangeTag::Equal => DiffTag::Equal,
+            ChangeTag::Delete => DiffTag::Delete,
+            ChangeTag::Insert => DiffTag::Insert,
+        };
+        push_merged(&mut parts, tag, change.value());
     }
-    (before_parts, after_parts)
+    parts
 }
 
 fn tokenize(value: &str) -> Vec<&str> {
@@ -102,6 +114,23 @@ mod tests {
         );
         assert!(
             new.iter()
+                .any(|part| part.tag == DiffTag::Insert && part.text == "new")
+        );
+    }
+
+    #[test]
+    fn inline_diff_keeps_equal_text_once() {
+        let parts = path_diff_inline("/music/old name.mp3", "/music/new name.mp3");
+        let rendered: String = parts.iter().map(|part| part.text.as_str()).collect();
+        assert_eq!(rendered, "/music/oldnew name.mp3");
+        assert!(
+            parts
+                .iter()
+                .any(|part| part.tag == DiffTag::Delete && part.text == "old")
+        );
+        assert!(
+            parts
+                .iter()
                 .any(|part| part.tag == DiffTag::Insert && part.text == "new")
         );
     }

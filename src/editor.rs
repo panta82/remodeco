@@ -235,6 +235,7 @@ mod tests {
             include_hidden: false,
             recursive: true,
             open_editor: true,
+            plan_format: crate::config::PlanFormat::Properties,
         };
         let editor = resolve_editor(&config).unwrap().unwrap();
         assert_eq!(editor.argv, vec!["nvim", "-c", "set number"]);

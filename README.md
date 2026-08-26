@@ -9,12 +9,12 @@ Here's how it works:
 
 1️⃣ Run `remodeco ~/Pictures`
 
-2️⃣ A markdown file like this opens in your editor:
+2️⃣ A `.properties` plan file opens in your editor:
 
-```markdown
-- `{01}`	/home/joesmith/Pictures/mom.jpg
-- `{02}`	/home/joesmith/Pictures/dad.jpg
-- `{03}`	/home/joesmith/Pictures/sis.jpg
+```properties
+F01	:	/home/joesmith/Pictures/mom.jpg
+F02	:	/home/joesmith/Pictures/dad.jpg
+F03	:	/home/joesmith/Pictures/sis.jpg
 ``` 
 
 3️⃣ Edit the file
@@ -33,19 +33,26 @@ If you accept the changes, your files will be renamed, copied, or moved to trash
 
 ### Plan file format
 
-Headings are labels only. Each file is represented by one strict, tab-separated
-line:
+Each file is one line, `F<id>` then a tab, `:`, a tab, then the destination
+path verbatim. Tabs are separators only — they are not allowed in paths.
+Headings are `#` comments and are labels only.
 
-```markdown
-- `{01}`	/absolute/path/to/file.txt
+```properties
+F01	:	/absolute/path/to/file.txt
 ```
 
-| Edit | Effect                          |
-| --- |---------------------------------|
-| Leave the path unchanged | no operation                    |
-| Change the full destination path | rename/move (or copy)           |
-| Leave the destination empty after the tab | move to desktop trash or delete |
-| Delete the line or comment it with `Ctrl+/` | skip                            |
+| Edit | Effect |
+| --- | --- |
+| Leave the path unchanged | no operation |
+| Change the full destination path | rename/move (or copy) |
+| Leave the destination empty after the colon | move to desktop trash or delete |
+| Delete the line or comment it with `Ctrl+/` | skip |
+
+Default file is `plan.properties`. `--format yaml` writes `plan.yaml`,
+`--format plain-text` writes `plan.txt` (no language highlighting). Same
+choice in config as `"format": "properties"` / `"yaml"` / `"plain-text"`.
+Draft sessions on `plan.md` or another extension are rewritten and moved on
+resume; edits are kept.
 
 ### Configuration
 

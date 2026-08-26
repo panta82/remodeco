@@ -1,19 +1,19 @@
-use crate::config::AppConfig;
+use crate::config::{AppConfig, PlanFormat};
 use crate::execute::run_journal;
 use crate::model::{
     Journal, JournalFinalStatus, JournalMode, ManifestEntry, ManifestFile, OpKind, Operation,
     PlannedKind, PlannedStep, SessionMode, SessionRecord, SessionStats, SessionStatus,
 };
 use crate::plan::{
-    body_hash, classify_ops, generate_plan, id_width_for_count, parse_plan, validate_plan_header,
-    whole_file_hash,
+    body_hash, classify_ops, generate_plan, id_width_for_count, is_legacy_plan_text, parse_plan,
+    render_plan, validate_plan_header, whole_file_hash,
 };
 use crate::scan::scan_tree;
 use crate::schedule::{ScheduleResult, capture_destination_parent, schedule};
 use crate::session::{
     HeldLock, active_executed_journal, execute_lock_path, make_session_id, new_journal, now,
-    read_journal, read_manifest, read_session, require_lock, session_dir, write_journal,
-    write_manifest, write_plan, write_session,
+    plan_file_name, read_journal, read_manifest, read_session, replace_plan, require_lock,
+    session_dir, write_journal, write_manifest, write_plan, write_session,
 };
 use anyhow::{Context, Result, bail};
 use rand::RngCore;
@@ -68,7 +68,7 @@ pub fn create_session(
         .collect();
     let id_width = id_width_for_count(entries.len());
     let plan = generate_plan(&id, &scan.root, &entries, id_width);
-    let plan_path = write_plan(&id, &plan)?;
+    let plan_path = write_plan(&id, &plan, plan_file_name(config.plan_format))?;
     let manifest_path = session_dir(&id)?.join("manifest.json");
     write_manifest(
         &id,
@@ -149,7 +149,7 @@ pub fn refresh_hashes(session: &mut SessionRecord) -> Result<bool> {
     Ok(true)
 }
 
-pub fn reset_session_plan(session: &mut SessionRecord) -> Result<()> {
+pub fn reset_session_plan(session: &mut SessionRecord, format: PlanFormat) -> Result<()> {
     if session.active_journal_id.is_some() {
         bail!("cannot reset a session with an active journal");
     }
@@ -163,13 +163,63 @@ pub fn reset_session_plan(session: &mut SessionRecord) -> Result<()> {
         &manifest.entries,
         session.id_width,
     );
-    write_plan(&session.id, &plan)?;
-    let whole = whole_file_hash(&plan);
-    session.generated_whole_file_hash = whole.clone();
-    session.whole_file_hash = whole;
-    session.body_hash = body_hash(&plan);
+    apply_plan(session, &plan, format)?;
+    session.generated_whole_file_hash = session.whole_file_hash.clone();
     session.plan_body_diverged = false;
     session.stats.changes = 0;
+    Ok(())
+}
+
+/// Move a draft session onto the preferred plan filename and rewrite legacy syntax.
+pub fn normalize_session_plan(session: &mut SessionRecord, format: PlanFormat) -> Result<bool> {
+    if session.status != SessionStatus::Draft {
+        return Ok(false);
+    }
+    let preferred = plan_file_name(format);
+    let current_name = Path::new(&session.plan_path)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default();
+    let raw = match fs::read_to_string(&session.plan_path) {
+        Ok(raw) => raw,
+        Err(_) => return Ok(false),
+    };
+    let parsed = match parse_plan(&raw) {
+        Ok(parsed) => parsed,
+        Err(_) => return Ok(false),
+    };
+    if parsed.unknown_lines.is_empty() && current_name == preferred && !is_legacy_plan_text(&raw) {
+        return Ok(false);
+    }
+    if parsed.unknown_lines.is_empty() {
+        if let Err(error) = validate_plan_header(&parsed, &session.id, &session.root) {
+            eprintln!("warning: leaving plan in place ({error})");
+            return Ok(false);
+        }
+        let destinations: HashMap<u64, String> = parsed
+            .bullets
+            .iter()
+            .map(|bullet| (bullet.id, bullet.destination.clone()))
+            .collect();
+        let manifest = read_manifest(&session.id)?;
+        let plan = render_plan(
+            &session.id,
+            &session.root,
+            &manifest.entries,
+            session.id_width,
+            Some(&destinations),
+        );
+        apply_plan(session, &plan, format)?;
+        return Ok(true);
+    }
+    Ok(false)
+}
+
+fn apply_plan(session: &mut SessionRecord, plan: &str, format: PlanFormat) -> Result<()> {
+    let plan_path = replace_plan(&session.id, plan, plan_file_name(format))?;
+    session.plan_path = path_text(&plan_path)?;
+    session.whole_file_hash = whole_file_hash(plan);
+    session.body_hash = body_hash(plan);
     session.revision += 1;
     write_session(session)?;
     Ok(())
@@ -187,7 +237,7 @@ fn parse_session_plan_at_hash(
     if bytes.len() > crate::plan::MAX_FILE_BYTES {
         bail!("plan too large");
     }
-    let raw = String::from_utf8(bytes).context("plan.md is not UTF-8")?;
+    let raw = String::from_utf8(bytes).context("plan is not UTF-8")?;
     if required_hash.is_some_and(|expected| whole_file_hash(&raw) != expected) {
         bail!("session changed since confirmation; reload");
     }
@@ -453,7 +503,7 @@ pub fn operation_counts(operations: &[Operation]) -> (usize, usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::EditorMode;
+    use crate::config::{EditorMode, PlanFormat};
     use std::sync::Mutex;
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
@@ -505,6 +555,7 @@ mod tests {
             include_hidden: false,
             recursive: true,
             open_editor: false,
+            plan_format: PlanFormat::Properties,
         }
     }
 
@@ -526,9 +577,9 @@ mod tests {
         let b_text = path_text(&b).unwrap();
         let sentinel = root.join(".swap-sentinel").to_string_lossy().into_owned();
         let edited = raw
-            .replace(&format!("\t{a_text}\n"), &format!("\t{sentinel}\n"))
-            .replace(&format!("\t{b_text}\n"), &format!("\t{a_text}\n"))
-            .replace(&format!("\t{sentinel}\n"), &format!("\t{b_text}\n"));
+            .replace(&format!("\t:\t{a_text}\n"), &format!("\t:\t{sentinel}\n"))
+            .replace(&format!("\t:\t{b_text}\n"), &format!("\t:\t{a_text}\n"))
+            .replace(&format!("\t:\t{sentinel}\n"), &format!("\t:\t{b_text}\n"));
         fs::write(&opened.session.plan_path, edited).unwrap();
         refresh_hashes(&mut opened.session).unwrap();
 
@@ -557,7 +608,7 @@ mod tests {
         let mut opened = create_session(&root, SessionMode::Move, &config(), true).unwrap();
         let source_text = path_text(&source).unwrap();
         let raw = fs::read_to_string(&opened.session.plan_path).unwrap();
-        let edited = raw.replace(&format!("\t{source_text}\n"), "\t\n");
+        let edited = raw.replace(&format!("\t:\t{source_text}\n"), "\t:\t\n");
         fs::write(&opened.session.plan_path, edited).unwrap();
         refresh_hashes(&mut opened.session).unwrap();
 
@@ -594,8 +645,8 @@ mod tests {
         let raw = fs::read_to_string(&opened.session.plan_path).unwrap();
         let destination = root.join("b.txt").to_string_lossy().into_owned();
         let edited = raw.replace(
-            &format!("\t{}\n", path_text(&source).unwrap()),
-            &format!("\t{destination}\n"),
+            &format!("\t:\t{}\n", path_text(&source).unwrap()),
+            &format!("\t:\t{destination}\n"),
         );
         fs::write(&opened.session.plan_path, edited).unwrap();
 
@@ -618,8 +669,8 @@ mod tests {
         let original = fs::read_to_string(&opened.session.plan_path).unwrap();
         let source_text = path_text(&source).unwrap();
         let edited = original.replace(
-            &format!("\t{source_text}\n"),
-            &format!("\t{}\n", root.join("b.txt").display()),
+            &format!("\t:\t{source_text}\n"),
+            &format!("\t:\t{}\n", root.join("b.txt").display()),
         );
         fs::write(&opened.session.plan_path, edited).unwrap();
         refresh_hashes(&mut opened.session).unwrap();
@@ -630,7 +681,7 @@ mod tests {
                 .any(|operation| operation.kind == OpKind::Move)
         );
 
-        reset_session_plan(&mut opened.session).unwrap();
+        reset_session_plan(&mut opened.session, PlanFormat::Properties).unwrap();
         let operations = parse_session_plan(&opened.session).unwrap();
         assert!(
             operations
@@ -648,6 +699,100 @@ mod tests {
         );
 
         opened.session.status = SessionStatus::Executed;
-        assert!(reset_session_plan(&mut opened.session).is_err());
+        assert!(reset_session_plan(&mut opened.session, PlanFormat::Properties).is_err());
+    }
+
+    #[test]
+    fn writes_plan_properties_by_default_and_honors_format() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let _restore = isolated_environment(&temp);
+        let root = temp.path().join("files");
+        fs::create_dir(&root).unwrap();
+        fs::write(root.join("a.txt"), "A").unwrap();
+
+        let properties = create_session(&root, SessionMode::Move, &config(), true).unwrap();
+        assert!(properties.session.plan_path.ends_with("plan.properties"));
+        let raw = fs::read_to_string(&properties.session.plan_path).unwrap();
+        assert!(raw.contains("F1\t:\t"));
+        drop(properties);
+
+        let mut yaml = config();
+        yaml.plan_format = PlanFormat::Yaml;
+        let yaml_session = create_session(&root, SessionMode::Move, &yaml, true).unwrap();
+        assert!(yaml_session.session.plan_path.ends_with("plan.yaml"));
+        drop(yaml_session);
+
+        let mut plain = config();
+        plain.plan_format = PlanFormat::PlainText;
+        let txt = create_session(&root, SessionMode::Move, &plain, true).unwrap();
+        assert!(txt.session.plan_path.ends_with("plan.txt"));
+    }
+
+    #[test]
+    fn migrates_legacy_markdown_plan_to_properties_preserving_destinations() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let _restore = isolated_environment(&temp);
+        let root = temp.path().join("files");
+        fs::create_dir(&root).unwrap();
+        let source = root.join("a.txt");
+        fs::write(&source, "A").unwrap();
+        let dest_text = path_text(&root.join("b.txt")).unwrap();
+
+        let mut opened = create_session(&root, SessionMode::Move, &config(), true).unwrap();
+        let md = format!(
+            "---\nremodeco: 1\nid: {}\nroot: {}\n---\n\n\
+             > Edit the path after `{{id}}` (the tab) to **rename/move**.\n\
+             - `{{1}}`\t{dest_text}\n",
+            opened.session.id,
+            crate::plan::yaml_single_quote(&opened.session.root),
+        );
+        let md_path = Path::new(&opened.session.plan_path).with_file_name("plan.md");
+        fs::write(&md_path, md).unwrap();
+        fs::remove_file(&opened.session.plan_path).unwrap();
+        opened.session.plan_path = path_text(&md_path).unwrap();
+        crate::session::write_session(&mut opened.session).unwrap();
+
+        assert!(normalize_session_plan(&mut opened.session, PlanFormat::Properties).unwrap());
+        assert!(opened.session.plan_path.ends_with("plan.properties"));
+        assert!(!md_path.exists());
+        let raw = fs::read_to_string(&opened.session.plan_path).unwrap();
+        assert!(raw.contains(&format!("F1\t:\t{dest_text}")));
+        assert!(!raw.contains("- `{"));
+        let operations = parse_session_plan(&opened.session).unwrap();
+        assert_eq!(operations[0].kind, OpKind::Move);
+        assert_eq!(operations[0].to, dest_text);
+    }
+
+    #[test]
+    fn reset_relocates_legacy_plan_md_to_txt() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let _restore = isolated_environment(&temp);
+        let root = temp.path().join("files");
+        fs::create_dir(&root).unwrap();
+        fs::write(root.join("a.txt"), "A").unwrap();
+
+        let mut opened = create_session(&root, SessionMode::Move, &config(), true).unwrap();
+        let md_path = Path::new(&opened.session.plan_path).with_file_name("plan.md");
+        fs::rename(&opened.session.plan_path, &md_path).unwrap();
+        opened.session.plan_path = path_text(&md_path).unwrap();
+        crate::session::write_session(&mut opened.session).unwrap();
+
+        reset_session_plan(&mut opened.session, PlanFormat::PlainText).unwrap();
+        assert!(opened.session.plan_path.ends_with("plan.txt"));
+        assert!(!md_path.exists());
+        assert!(
+            !Path::new(&opened.session.plan_path)
+                .with_file_name("plan.properties")
+                .exists()
+        );
+        assert!(
+            parse_session_plan(&opened.session)
+                .unwrap()
+                .iter()
+                .all(|operation| operation.kind == OpKind::Noop)
+        );
     }
 }

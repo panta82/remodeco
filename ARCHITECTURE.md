@@ -37,7 +37,10 @@ line-oriented prompt with the same execute/editor/cancel flow.
 
 ## Modules
 
-- `plan`: generate and strictly parse the line-oriented `plan.md` format.
+- `plan`: generate and strictly parse the line-oriented plan
+  (`F0001<tab>:<tab>/path`, `#` comments). Default file is `plan.properties`;
+  `--format yaml` / `--format plain-text` write `plan.yaml` / `plan.txt`.
+  Draft sessions on another extension are migrated on resume.
 - `scan`: deterministic filesystem scan plus source fingerprints.
 - `session`: compatible session, manifest, journal, locking, and atomic storage.
 - `schedule`: validate operations and order mkdir/stage/commit/copy/trash steps.

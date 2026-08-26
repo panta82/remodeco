@@ -47,7 +47,7 @@ enum Confirm {
 
 pub fn run_tui(session: &mut SessionRecord, config: &AppConfig) -> Result<TuiAction> {
     loop {
-        match run_once(session)? {
+        match run_once(session, config)? {
             LoopAction::Execute => {
                 // Bind execution to exactly what was rendered and confirmed.
                 // If the editor wrote between the last poll and this keypress,
@@ -67,26 +67,26 @@ pub fn run_tui(session: &mut SessionRecord, config: &AppConfig) -> Result<TuiAct
     }
 }
 
-fn run_once(session: &mut SessionRecord) -> Result<LoopAction> {
+fn run_once(session: &mut SessionRecord, config: &AppConfig) -> Result<LoopAction> {
     install_panic_hook();
     let cleanup = match enter_fullscreen() {
         Ok(cleanup) => cleanup,
-        Err(_) => return plain_prompt(session),
+        Err(_) => return plain_prompt(session, config),
     };
     let mut terminal = match Terminal::new(CrosstermBackend::new(stdout())) {
         Ok(terminal) => terminal,
         Err(_) => {
             drop(cleanup);
-            return plain_prompt(session);
+            return plain_prompt(session, config);
         }
     };
-    let result = event_loop(&mut terminal, session);
+    let result = event_loop(&mut terminal, session, config);
     drop(terminal);
     drop(cleanup);
     result
 }
 
-fn plain_prompt(session: &mut SessionRecord) -> Result<LoopAction> {
+fn plain_prompt(session: &mut SessionRecord, config: &AppConfig) -> Result<LoopAction> {
     let (operations, parse_error) = load_operations(session);
     println!("remodeco {} · {}", session.mode, session.status);
     println!("{}", session.plan_path);
@@ -152,7 +152,7 @@ fn plain_prompt(session: &mut SessionRecord) -> Result<LoopAction> {
                 input.clear();
                 io::stdin().read_line(&mut input)?;
                 if matches!(input.trim().chars().next(), Some('y' | 'Y')) {
-                    reset_session_plan(session)?;
+                    reset_session_plan(session, config.plan_format)?;
                     println!("plan reset");
                     return Ok(LoopAction::Reset);
                 }
@@ -211,6 +211,7 @@ struct ViewState {
 fn event_loop(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     session: &mut SessionRecord,
+    config: &AppConfig,
 ) -> Result<LoopAction> {
     let (operations, parse_error) = load_operations(session);
     let mut state = ViewState {
@@ -229,7 +230,7 @@ fn event_loop(
                 Event::Key(key) if key.kind != KeyEventKind::Release => {
                     if let Some(action) = handle_key(key, &mut state) {
                         if matches!(action, LoopAction::Reset) {
-                            match reset_session_plan(session) {
+                            match reset_session_plan(session, config.plan_format) {
                                 Ok(()) => {
                                     let loaded = load_operations(session);
                                     state.operations = loaded.0;

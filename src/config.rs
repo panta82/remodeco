@@ -15,6 +15,25 @@ pub enum EditorMode {
     Tty,
 }
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "kebab-case")]
+pub enum PlanFormat {
+    #[default]
+    Properties,
+    Yaml,
+    PlainText,
+}
+
+impl PlanFormat {
+    pub fn file_name(self) -> &'static str {
+        match self {
+            Self::Properties => "plan.properties",
+            Self::Yaml => "plan.yaml",
+            Self::PlainText => "plan.txt",
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize)]
 #[serde(untagged)]
 pub enum EditorCommand {
@@ -30,6 +49,7 @@ pub struct AppConfig {
     pub include_hidden: bool,
     pub recursive: bool,
     pub open_editor: bool,
+    pub plan_format: PlanFormat,
 }
 
 #[derive(Default, Deserialize)]
@@ -41,6 +61,8 @@ struct PartialConfig {
     include_hidden: Option<bool>,
     recursive: Option<bool>,
     open_editor: Option<bool>,
+    format: Option<PlanFormat>,
+    plain_text: Option<bool>,
 }
 
 pub fn config_dir() -> Result<PathBuf> {
@@ -74,6 +96,7 @@ pub fn load_config(root: &Path, cli: &Cli) -> Result<AppConfig> {
         include_hidden: false,
         recursive: true,
         open_editor: true,
+        plan_format: PlanFormat::Properties,
     };
     merge_file(&mut config, &config_dir()?.join("config.json"))?;
     merge_file(&mut config, &root.join(".remodeco.json"))?;
@@ -95,6 +118,9 @@ pub fn load_config(root: &Path, cli: &Cli) -> Result<AppConfig> {
     }
     if cli.no_edit || env::var("REMODECO_NO_EDIT").as_deref() == Ok("1") {
         config.open_editor = false;
+    }
+    if let Some(format) = cli.format {
+        config.plan_format = format;
     }
     if let Ok(editor) = env::var("REMODECO_EDITOR") {
         config.editor = Some(EditorCommand::String(editor));
@@ -127,6 +153,11 @@ fn merge_file(config: &mut AppConfig, path: &Path) -> Result<()> {
     }
     if let Some(value) = partial.open_editor {
         config.open_editor = value;
+    }
+    if let Some(value) = partial.format {
+        config.plan_format = value;
+    } else if partial.plain_text == Some(true) {
+        config.plan_format = PlanFormat::PlainText;
     }
     Ok(())
 }

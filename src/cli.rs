@@ -1,4 +1,4 @@
-use crate::config::EditorMode;
+use crate::config::{EditorMode, PlanFormat};
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
@@ -70,6 +70,10 @@ pub struct Cli {
     /// Print extra diagnostics.
     #[arg(long)]
     pub verbose: bool,
+
+    /// Plan file format: properties (default), yaml, or plain-text.
+    #[arg(long, value_enum, value_name = "FORMAT")]
+    pub format: Option<PlanFormat>,
 }
 
 #[derive(Clone, Debug, Subcommand)]
@@ -88,6 +92,20 @@ impl clap::ValueEnum for EditorMode {
             Self::Auto => "auto",
             Self::Gui => "gui",
             Self::Tty => "tty",
+        }))
+    }
+}
+
+impl clap::ValueEnum for PlanFormat {
+    fn value_variants<'a>() -> &'a [Self] {
+        &[Self::Properties, Self::Yaml, Self::PlainText]
+    }
+
+    fn to_possible_value(&self) -> Option<clap::builder::PossibleValue> {
+        Some(clap::builder::PossibleValue::new(match self {
+            Self::Properties => "properties",
+            Self::Yaml => "yaml",
+            Self::PlainText => "plain-text",
         }))
     }
 }

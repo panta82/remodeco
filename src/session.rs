@@ -1,5 +1,5 @@
 use crate::atomic::{write_json_atomic, write_text_atomic};
-use crate::config::data_dir;
+use crate::config::{PlanFormat, data_dir};
 use crate::model::{
     Journal, JournalFinalStatus, JournalMode, JournalStep, ManifestFile, PlannedStep, SessionMode,
     SessionRecord, StepState,
@@ -111,9 +111,28 @@ pub fn write_manifest(id: &str, manifest: &ManifestFile) -> Result<()> {
     write_json_atomic(&session_dir(id)?.join("manifest.json"), manifest)
 }
 
-pub fn write_plan(id: &str, text: &str) -> Result<PathBuf> {
-    let path = session_dir(id)?.join("plan.md");
+pub const PLAN_FILE_NAMES: &[&str] = &["plan.properties", "plan.yaml", "plan.txt", "plan.md"];
+
+pub fn plan_file_name(format: PlanFormat) -> &'static str {
+    format.file_name()
+}
+
+pub fn write_plan(id: &str, text: &str, file_name: &str) -> Result<PathBuf> {
+    let path = session_dir(id)?.join(file_name);
     write_text_atomic(&path, text)?;
+    Ok(path)
+}
+
+pub fn replace_plan(id: &str, text: &str, file_name: &str) -> Result<PathBuf> {
+    let path = write_plan(id, text, file_name)?;
+    for name in PLAN_FILE_NAMES {
+        if *name != file_name {
+            let extra = session_dir(id)?.join(name);
+            if extra.exists() {
+                fs::remove_file(&extra).with_context(|| format!("remove {}", extra.display()))?;
+            }
+        }
+    }
     Ok(path)
 }
 

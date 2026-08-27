@@ -1,7 +1,7 @@
 use crate::model::{
     DestParentRef, ManifestEntry, OpKind, Operation, PlannedKind, PlannedStep, SessionMode,
 };
-use crate::scan::{directory_identity, lstat_fingerprint};
+use crate::scan::directory_identity;
 use anyhow::{Context, Result, bail};
 use rand::RngCore;
 use std::collections::{HashMap, HashSet};
@@ -48,18 +48,9 @@ fn try_schedule(
         .iter()
         .filter(|operation| operation.kind != OpKind::Noop && operation.kind != OpKind::Skip)
     {
-        let entry = by_id
+        by_id
             .get(&operation.id)
             .with_context(|| format!("missing manifest {}", operation.id))?;
-        let live = lstat_fingerprint(Path::new(&operation.from), entry.fingerprint.kind)
-            .with_context(|| format!("missing source {{{}}} {}", operation.id, operation.from))?;
-        if live != entry.fingerprint {
-            bail!(
-                "fingerprint mismatch {{{}}} {}",
-                operation.id,
-                operation.from
-            );
-        }
     }
 
     let mut destination_counts = HashMap::<&str, usize>::new();
@@ -506,5 +497,52 @@ mod tests {
                 .count(),
             2
         );
+    }
+
+    #[test]
+    fn changed_fingerprint_still_schedules() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("a"), "a").unwrap();
+        let manifest = manifest(dir.path());
+        fs::write(dir.path().join("a"), "changed").unwrap();
+        let operations = vec![Operation {
+            id: 1,
+            from: manifest[0].from.clone(),
+            to: dir.path().join("b").to_str().unwrap().to_owned(),
+            kind: OpKind::Move,
+        }];
+        let result = schedule(
+            SessionMode::Move,
+            dir.path().to_str().unwrap(),
+            "s",
+            &manifest,
+            &operations,
+        );
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        assert_eq!(result.steps.len(), 1);
+        assert_eq!(result.steps[0].op, PlannedKind::Commit);
+    }
+
+    #[test]
+    fn missing_source_still_schedules() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("a"), "a").unwrap();
+        let manifest = manifest(dir.path());
+        fs::remove_file(dir.path().join("a")).unwrap();
+        let operations = vec![Operation {
+            id: 1,
+            from: manifest[0].from.clone(),
+            to: dir.path().join("b").to_str().unwrap().to_owned(),
+            kind: OpKind::Move,
+        }];
+        let result = schedule(
+            SessionMode::Move,
+            dir.path().to_str().unwrap(),
+            "s",
+            &manifest,
+            &operations,
+        );
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        assert_eq!(result.steps[0].op, PlannedKind::Commit);
     }
 }

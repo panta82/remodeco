@@ -7,6 +7,7 @@ use remodeco::controller::{
     undo_session,
 };
 use remodeco::editor::launch_editor;
+use remodeco::execute::StdioExecuteUi;
 use remodeco::model::{JournalFinalStatus, SessionMode};
 use remodeco::schedule::format_schedule;
 use remodeco::session::{list_session_ids, list_unfinished, read_session, write_session};
@@ -49,7 +50,8 @@ fn run() -> Result<()> {
 
     if let Some(Command::Undo { session_id }) = &cli.command {
         let mut opened = open_session(session_id)?;
-        let journal = undo_session(&mut opened.session)?;
+        let mut ui = StdioExecuteUi;
+        let journal = undo_session(&mut opened.session, &mut ui)?;
         if journal.final_status == Some(JournalFinalStatus::Undone) {
             println!("undone {}", journal.journal_id);
             return Ok(());
@@ -140,7 +142,8 @@ fn run() -> Result<()> {
         TuiAction::Execute(confirmed) => confirmed,
     };
     refresh_hashes(&mut opened.session)?;
-    let journal = execute_session(&mut opened.session, &confirmed)?;
+    let mut ui = StdioExecuteUi;
+    let journal = execute_session(&mut opened.session, &confirmed, &mut ui)?;
     if journal.final_status == Some(JournalFinalStatus::Executed) {
         println!("executed {}", journal.journal_id);
         Ok(())

@@ -1,5 +1,5 @@
 use crate::config::{AppConfig, PlanFormat};
-use crate::execute::run_journal;
+use crate::execute::{ExecuteUi, run_journal};
 use crate::model::{
     Journal, JournalFinalStatus, JournalMode, ManifestEntry, ManifestFile, OpKind, Operation,
     PlannedKind, PlannedStep, SessionMode, SessionRecord, SessionStats, SessionStatus,
@@ -278,7 +278,11 @@ pub fn expected(session: &SessionRecord) -> ExpectedSession {
     }
 }
 
-pub fn execute_session(session: &mut SessionRecord, expected: &ExpectedSession) -> Result<Journal> {
+pub fn execute_session(
+    session: &mut SessionRecord,
+    expected: &ExpectedSession,
+    ui: &mut dyn ExecuteUi,
+) -> Result<Journal> {
     refresh_hashes(session)?;
     if session.revision != expected.revision
         || session.mode != expected.mode
@@ -333,14 +337,8 @@ pub fn execute_session(session: &mut SessionRecord, expected: &ExpectedSession) 
     session.active_journal_id = Some(journal.journal_id.clone());
     session.status = SessionStatus::Executing;
     write_session(session)?;
-    run_journal(&session.id, &mut journal)?;
-    if journal
-        .steps
-        .iter()
-        .any(|step| step.state == crate::model::StepState::Failed)
-    {
-        session.status = SessionStatus::ExecuteInterrupted;
-    } else {
+    run_journal(&session.id, &mut journal, ui)?;
+    if journal.final_status == Some(JournalFinalStatus::Executed) {
         session.status = SessionStatus::Executed;
         session.stats.changes = journal
             .steps
@@ -350,12 +348,14 @@ pub fn execute_session(session: &mut SessionRecord, expected: &ExpectedSession) 
                     && step.planned.op != PlannedKind::Mkdir
             })
             .count();
+    } else {
+        session.status = SessionStatus::ExecuteInterrupted;
     }
     write_session(session)?;
     Ok(journal)
 }
 
-pub fn undo_session(session: &mut SessionRecord) -> Result<Journal> {
+pub fn undo_session(session: &mut SessionRecord, ui: &mut dyn ExecuteUi) -> Result<Journal> {
     let active = active_executed_journal(session)?;
     let mut inverse = Vec::new();
     let mut mkdirs = HashMap::<PathBuf, String>::new();
@@ -397,10 +397,9 @@ pub fn undo_session(session: &mut SessionRecord) -> Result<Journal> {
                 ));
             }
             PlannedKind::Trash => {
-                let key = source
-                    .trash_restore_key
-                    .as_ref()
-                    .context("executed trash has no restore key")?;
+                let Some(key) = source.trash_restore_key.as_ref() else {
+                    continue;
+                };
                 let parent = capture_destination_parent(
                     Path::new(&key.original_path),
                     &mut inverse,
@@ -434,7 +433,7 @@ pub fn undo_session(session: &mut SessionRecord) -> Result<Journal> {
     session.active_journal_id = Some(journal.journal_id.clone());
     session.status = SessionStatus::Undoing;
     write_session(session)?;
-    run_journal(&session.id, &mut journal)?;
+    run_journal(&session.id, &mut journal, ui)?;
     session.status = if journal.final_status == Some(JournalFinalStatus::Undone) {
         for step in &active.steps {
             if step.planned.op == PlannedKind::Trash {
@@ -504,6 +503,7 @@ pub fn operation_counts(operations: &[Operation]) -> (usize, usize) {
 mod tests {
     use super::*;
     use crate::config::{EditorMode, PlanFormat};
+    use std::os::unix::fs::PermissionsExt;
     use std::sync::Mutex;
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
@@ -584,12 +584,13 @@ mod tests {
         refresh_hashes(&mut opened.session).unwrap();
 
         let snapshot = expected(&opened.session);
-        let journal = execute_session(&mut opened.session, &snapshot).unwrap();
+        let mut ui = crate::execute::QuietExecuteUi;
+        let journal = execute_session(&mut opened.session, &snapshot, &mut ui).unwrap();
         assert_eq!(journal.final_status, Some(JournalFinalStatus::Executed));
         assert_eq!(fs::read_to_string(&a).unwrap(), "B");
         assert_eq!(fs::read_to_string(&b).unwrap(), "A");
 
-        let undo = undo_session(&mut opened.session).unwrap();
+        let undo = undo_session(&mut opened.session, &mut ui).unwrap();
         assert_eq!(undo.final_status, Some(JournalFinalStatus::Undone));
         assert_eq!(fs::read_to_string(&a).unwrap(), "A");
         assert_eq!(fs::read_to_string(&b).unwrap(), "B");
@@ -613,7 +614,8 @@ mod tests {
         refresh_hashes(&mut opened.session).unwrap();
 
         let snapshot = expected(&opened.session);
-        let journal = execute_session(&mut opened.session, &snapshot).unwrap();
+        let mut ui = crate::execute::QuietExecuteUi;
+        let journal = execute_session(&mut opened.session, &snapshot, &mut ui).unwrap();
         assert_eq!(journal.final_status, Some(JournalFinalStatus::Executed));
         assert!(!source.exists());
         let key = journal
@@ -624,7 +626,7 @@ mod tests {
         assert!(Path::new(&key.files_path).exists());
         assert!(Path::new(key.info_path.as_ref().unwrap()).exists());
 
-        let undo = undo_session(&mut opened.session).unwrap();
+        let undo = undo_session(&mut opened.session, &mut ui).unwrap();
         assert_eq!(undo.final_status, Some(JournalFinalStatus::Undone));
         assert_eq!(fs::read_to_string(&source).unwrap(), "music");
         assert!(!Path::new(key.info_path.as_ref().unwrap()).exists());
@@ -650,7 +652,8 @@ mod tests {
         );
         fs::write(&opened.session.plan_path, edited).unwrap();
 
-        let error = execute_session(&mut opened.session, &confirmed).unwrap_err();
+        let mut ui = crate::execute::QuietExecuteUi;
+        let error = execute_session(&mut opened.session, &confirmed, &mut ui).unwrap_err();
         assert!(error.to_string().contains("changed since confirmation"));
         assert!(source.exists());
         assert!(!Path::new(&destination).exists());
@@ -793,6 +796,301 @@ mod tests {
                 .unwrap()
                 .iter()
                 .all(|operation| operation.kind == OpKind::Noop)
+        );
+    }
+
+    fn plan_two_renames(root: &Path) -> (OpenedSession, PathBuf, PathBuf, PathBuf, PathBuf) {
+        fs::create_dir(root).unwrap();
+        let a = root.join("a.txt");
+        let b = root.join("b.txt");
+        let a_to = root.join("a-new.txt");
+        let b_to = root.join("b-new.txt");
+        fs::write(&a, "A").unwrap();
+        fs::write(&b, "B").unwrap();
+        let mut opened = create_session(root, SessionMode::Move, &config(), true).unwrap();
+        let raw = fs::read_to_string(&opened.session.plan_path).unwrap();
+        let edited = raw
+            .replace(
+                &format!("\t:\t{}\n", path_text(&a).unwrap()),
+                &format!("\t:\t{}\n", path_text(&a_to).unwrap()),
+            )
+            .replace(
+                &format!("\t:\t{}\n", path_text(&b).unwrap()),
+                &format!("\t:\t{}\n", path_text(&b_to).unwrap()),
+            );
+        fs::write(&opened.session.plan_path, edited).unwrap();
+        refresh_hashes(&mut opened.session).unwrap();
+        (opened, a, b, a_to, b_to)
+    }
+
+    #[test]
+    fn skip_leaves_changed_file_and_continues() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let _restore = isolated_environment(&temp);
+        let root = temp.path().join("files");
+        let (mut opened, a, b, a_to, b_to) = plan_two_renames(&root);
+        fs::write(&b, "B-changed").unwrap();
+
+        let snapshot = expected(&opened.session);
+        let mut ui = crate::execute::ScriptedExecuteUi {
+            choice: crate::execute::MismatchAction::Skip,
+            ..Default::default()
+        };
+        let journal = execute_session(&mut opened.session, &snapshot, &mut ui).unwrap();
+        assert_eq!(journal.final_status, Some(JournalFinalStatus::Executed));
+        assert!(a_to.exists());
+        assert!(!a.exists());
+        assert!(b.exists());
+        assert!(!b_to.exists());
+        assert!(
+            journal
+                .steps
+                .iter()
+                .any(|step| step.state == crate::model::StepState::Skipped)
+        );
+        assert!(ui.commands.iter().any(|line| line.starts_with("mv ")));
+    }
+
+    #[test]
+    fn abort_stops_before_the_changed_file() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let _restore = isolated_environment(&temp);
+        let root = temp.path().join("files");
+        let (mut opened, a, b, a_to, b_to) = plan_two_renames(&root);
+        fs::write(&a, "A-changed").unwrap();
+
+        let snapshot = expected(&opened.session);
+        let mut ui = crate::execute::ScriptedExecuteUi {
+            choice: crate::execute::MismatchAction::Abort,
+            ..Default::default()
+        };
+        let journal = execute_session(&mut opened.session, &snapshot, &mut ui).unwrap();
+        assert_ne!(journal.final_status, Some(JournalFinalStatus::Executed));
+        assert_eq!(opened.session.status, SessionStatus::ExecuteInterrupted);
+        assert!(a.exists());
+        assert!(b.exists());
+        assert!(!a_to.exists());
+        assert!(!b_to.exists());
+        assert!(
+            journal
+                .steps
+                .iter()
+                .any(|step| step.error.as_deref() == Some("aborted"))
+        );
+    }
+
+    #[test]
+    fn proceed_renames_the_changed_file() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let _restore = isolated_environment(&temp);
+        let root = temp.path().join("files");
+        let (mut opened, a, b, a_to, b_to) = plan_two_renames(&root);
+        fs::write(&b, "B-changed").unwrap();
+
+        let snapshot = expected(&opened.session);
+        let mut ui = crate::execute::ScriptedExecuteUi {
+            choice: crate::execute::MismatchAction::Proceed,
+            ..Default::default()
+        };
+        let journal = execute_session(&mut opened.session, &snapshot, &mut ui).unwrap();
+        assert_eq!(journal.final_status, Some(JournalFinalStatus::Executed));
+        assert!(!a.exists());
+        assert!(!b.exists());
+        assert_eq!(fs::read_to_string(&a_to).unwrap(), "A");
+        assert_eq!(fs::read_to_string(&b_to).unwrap(), "B-changed");
+        assert_eq!(ui.commands.len(), 2);
+    }
+
+    #[test]
+    fn all_proceeds_remaining_changed_files() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let _restore = isolated_environment(&temp);
+        let root = temp.path().join("files");
+        let (mut opened, a, b, a_to, b_to) = plan_two_renames(&root);
+        fs::write(&a, "A-changed").unwrap();
+        fs::write(&b, "B-changed").unwrap();
+
+        let snapshot = expected(&opened.session);
+        let mut ui = crate::execute::ScriptedExecuteUi {
+            choice: crate::execute::MismatchAction::All,
+            ..Default::default()
+        };
+        let journal = execute_session(&mut opened.session, &snapshot, &mut ui).unwrap();
+        assert_eq!(journal.final_status, Some(JournalFinalStatus::Executed));
+        assert_eq!(ui.prompts, 1);
+        assert!(!a.exists());
+        assert!(!b.exists());
+        assert_eq!(fs::read_to_string(&a_to).unwrap(), "A-changed");
+        assert_eq!(fs::read_to_string(&b_to).unwrap(), "B-changed");
+    }
+
+    #[test]
+    fn skip_leaves_missing_file_and_continues() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let _restore = isolated_environment(&temp);
+        let root = temp.path().join("files");
+        let (mut opened, a, b, a_to, b_to) = plan_two_renames(&root);
+        fs::remove_file(&b).unwrap();
+
+        let snapshot = expected(&opened.session);
+        let mut ui = crate::execute::ScriptedExecuteUi {
+            choice: crate::execute::MismatchAction::Skip,
+            ..Default::default()
+        };
+        let journal = execute_session(&mut opened.session, &snapshot, &mut ui).unwrap();
+        assert_eq!(journal.final_status, Some(JournalFinalStatus::Executed));
+        assert!(a_to.exists());
+        assert!(!a.exists());
+        assert!(!b.exists());
+        assert!(!b_to.exists());
+        assert_eq!(ui.prompts, 1);
+    }
+
+    #[test]
+    fn all_skips_remaining_missing_files() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let _restore = isolated_environment(&temp);
+        let root = temp.path().join("files");
+        let (mut opened, a, b, a_to, b_to) = plan_two_renames(&root);
+        fs::remove_file(&a).unwrap();
+        fs::remove_file(&b).unwrap();
+
+        let snapshot = expected(&opened.session);
+        let mut ui = crate::execute::ScriptedExecuteUi {
+            choice: crate::execute::MismatchAction::All,
+            ..Default::default()
+        };
+        let journal = execute_session(&mut opened.session, &snapshot, &mut ui).unwrap();
+        assert_eq!(journal.final_status, Some(JournalFinalStatus::Executed));
+        assert_eq!(ui.prompts, 1);
+        assert!(!a.exists());
+        assert!(!b.exists());
+        assert!(!a_to.exists());
+        assert!(!b_to.exists());
+        assert!(
+            journal
+                .steps
+                .iter()
+                .filter(|step| step.state == crate::model::StepState::Skipped)
+                .count()
+                >= 2
+        );
+    }
+
+    fn poison_home_trash(temp: &tempfile::TempDir) {
+        let trash = temp.path().join("xdg/Trash");
+        fs::create_dir_all(trash.join("files")).unwrap();
+        fs::create_dir_all(trash.join("info")).unwrap();
+        for path in [trash.clone(), trash.join("files"), trash.join("info")] {
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+    }
+
+    fn plan_trashes(root: &Path, names: &[&str]) -> (OpenedSession, Vec<PathBuf>) {
+        fs::create_dir(root).unwrap();
+        let mut paths = Vec::new();
+        for name in names {
+            let path = root.join(name);
+            fs::write(&path, name).unwrap();
+            paths.push(path);
+        }
+        let mut opened = create_session(root, SessionMode::Move, &config(), true).unwrap();
+        let mut raw = fs::read_to_string(&opened.session.plan_path).unwrap();
+        for path in &paths {
+            raw = raw.replace(&format!("\t:\t{}\n", path_text(path).unwrap()), "\t:\t\n");
+        }
+        fs::write(&opened.session.plan_path, raw).unwrap();
+        refresh_hashes(&mut opened.session).unwrap();
+        (opened, paths)
+    }
+
+    #[test]
+    fn unsafe_trash_can_permanently_delete() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let _restore = isolated_environment(&temp);
+        poison_home_trash(&temp);
+        let root = temp.path().join("files");
+        let (mut opened, paths) = plan_trashes(&root, &["gone.txt"]);
+        let source = &paths[0];
+
+        let snapshot = expected(&opened.session);
+        let mut ui = crate::execute::ScriptedExecuteUi {
+            trash_choice: crate::execute::TrashFallbackAction::Delete,
+            ..Default::default()
+        };
+        let journal = execute_session(&mut opened.session, &snapshot, &mut ui).unwrap();
+        assert_eq!(journal.final_status, Some(JournalFinalStatus::Executed));
+        assert_eq!(ui.trash_prompts, 1);
+        assert!(!source.exists());
+        assert!(
+            journal
+                .steps
+                .iter()
+                .filter(|step| step.planned.op == PlannedKind::Trash)
+                .all(|step| step.trash_restore_key.is_none())
+        );
+    }
+
+    #[test]
+    fn unsafe_trash_skip_keeps_the_file() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let _restore = isolated_environment(&temp);
+        poison_home_trash(&temp);
+        let root = temp.path().join("files");
+        let (mut opened, paths) = plan_trashes(&root, &["keep.txt"]);
+        let source = &paths[0];
+
+        let snapshot = expected(&opened.session);
+        let mut ui = crate::execute::ScriptedExecuteUi {
+            trash_choice: crate::execute::TrashFallbackAction::Skip,
+            ..Default::default()
+        };
+        let journal = execute_session(&mut opened.session, &snapshot, &mut ui).unwrap();
+        assert_eq!(journal.final_status, Some(JournalFinalStatus::Executed));
+        assert!(source.exists());
+        assert_eq!(fs::read_to_string(source).unwrap(), "keep.txt");
+        assert!(
+            journal
+                .steps
+                .iter()
+                .any(|step| step.state == crate::model::StepState::Skipped)
+        );
+    }
+
+    #[test]
+    fn unsafe_trash_all_deletes_remaining() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let _restore = isolated_environment(&temp);
+        poison_home_trash(&temp);
+        let root = temp.path().join("files");
+        let (mut opened, paths) = plan_trashes(&root, &["one.txt", "two.txt"]);
+
+        let snapshot = expected(&opened.session);
+        let mut ui = crate::execute::ScriptedExecuteUi {
+            trash_choice: crate::execute::TrashFallbackAction::All,
+            ..Default::default()
+        };
+        let journal = execute_session(&mut opened.session, &snapshot, &mut ui).unwrap();
+        assert_eq!(journal.final_status, Some(JournalFinalStatus::Executed));
+        assert_eq!(ui.trash_prompts, 1);
+        assert!(!paths[0].exists());
+        assert!(!paths[1].exists());
+        assert!(
+            journal
+                .steps
+                .iter()
+                .filter(|step| step.planned.op == PlannedKind::Trash)
+                .all(|step| step.state == crate::model::StepState::Committed
+                    && step.trash_restore_key.is_none())
         );
     }
 }

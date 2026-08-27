@@ -1,6 +1,6 @@
 use crate::model::{
-    DestParentRef, DirectoryIdentity, Journal, JournalFinalStatus, PlannedKind, SourceKind,
-    StepState,
+    DestParentRef, DirectoryIdentity, Journal, JournalFinalStatus, PlannedKind, PlannedStep,
+    SourceKind, StepState,
 };
 use crate::native::{copy_no_replace, rename_no_replace, symlink_no_replace};
 use crate::scan::{directory_identity, fingerprint_from_metadata, lstat_fingerprint};
@@ -8,10 +8,126 @@ use crate::session::write_journal;
 use crate::trash::{locate_trash, perform_trash, unique_trash_key};
 use anyhow::{Context, Result, bail};
 use std::fs;
-use std::io::{BufReader, Read};
+use std::io::{self, BufReader, IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
 
-pub fn run_journal(session_id: &str, journal: &mut Journal) -> Result<()> {
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MismatchAction {
+    Proceed,
+    Skip,
+    All,
+    Abort,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TrashFallbackAction {
+    Delete,
+    Skip,
+    All,
+    Abort,
+}
+
+pub trait ExecuteUi {
+    fn print_command(&mut self, command: &str);
+    fn resolve_mismatch(&mut self, kind: &str, path: &str, missing: bool)
+    -> Result<MismatchAction>;
+    fn resolve_unsafe_trash(&mut self, path: &str, reason: &str) -> Result<TrashFallbackAction>;
+}
+
+pub struct StdioExecuteUi;
+
+impl ExecuteUi for StdioExecuteUi {
+    fn print_command(&mut self, command: &str) {
+        println!("{command}");
+        let _ = io::stdout().flush();
+    }
+
+    fn resolve_mismatch(
+        &mut self,
+        kind: &str,
+        path: &str,
+        missing: bool,
+    ) -> Result<MismatchAction> {
+        let message = if missing {
+            format!("⚠️ {kind} target is missing: {path}")
+        } else {
+            format!("⚠️ {kind} target has changed since the plan was made: {path}")
+        };
+        if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
+            bail!("{message}");
+        }
+        println!("{message}");
+        loop {
+            if missing {
+                print!("(s)kip   (a)ll   (q)uit ");
+            } else {
+                print!("(p)roceed   (s)kip   (a)ll   (q)uit ");
+            }
+            io::stdout().flush()?;
+            let mut input = String::new();
+            if io::stdin().read_line(&mut input)? == 0 {
+                return Ok(MismatchAction::Abort);
+            }
+            match input.trim().chars().next() {
+                Some('p' | 'P') if !missing => return Ok(MismatchAction::Proceed),
+                Some('s' | 'S') => return Ok(MismatchAction::Skip),
+                Some('a' | 'A') => return Ok(MismatchAction::All),
+                Some('q' | 'Q') => return Ok(MismatchAction::Abort),
+                _ => {}
+            }
+        }
+    }
+
+    fn resolve_unsafe_trash(&mut self, path: &str, reason: &str) -> Result<TrashFallbackAction> {
+        let message = format!("⚠️ cannot send to trash ({reason}): {path}");
+        if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
+            bail!("{message}");
+        }
+        println!("{message}");
+        loop {
+            print!("(d)elete   (s)kip   (a)ll   (q)uit ");
+            io::stdout().flush()?;
+            let mut input = String::new();
+            if io::stdin().read_line(&mut input)? == 0 {
+                return Ok(TrashFallbackAction::Abort);
+            }
+            match input.trim().chars().next() {
+                Some('d' | 'D') => return Ok(TrashFallbackAction::Delete),
+                Some('s' | 'S') => return Ok(TrashFallbackAction::Skip),
+                Some('a' | 'A') => return Ok(TrashFallbackAction::All),
+                Some('q' | 'Q') => return Ok(TrashFallbackAction::Abort),
+                _ => {}
+            }
+        }
+    }
+}
+
+pub struct QuietExecuteUi;
+
+impl ExecuteUi for QuietExecuteUi {
+    fn print_command(&mut self, _command: &str) {}
+
+    fn resolve_mismatch(
+        &mut self,
+        kind: &str,
+        path: &str,
+        missing: bool,
+    ) -> Result<MismatchAction> {
+        if missing {
+            bail!("{kind} target is missing: {path}");
+        }
+        bail!("{kind} target has changed since the plan was made: {path}");
+    }
+
+    fn resolve_unsafe_trash(&mut self, path: &str, reason: &str) -> Result<TrashFallbackAction> {
+        bail!("cannot send to trash: {reason}: {path}");
+    }
+}
+
+pub fn run_journal(session_id: &str, journal: &mut Journal, ui: &mut dyn ExecuteUi) -> Result<()> {
+    let mut proceed_all = false;
+    let mut skip_all_missing = false;
+    let mut delete_all_untrashable = false;
     for index in 0..journal.steps.len() {
         if matches!(
             journal.steps[index].state,
@@ -25,9 +141,110 @@ pub fn run_journal(session_id: &str, journal: &mut Journal) -> Result<()> {
             write_journal(session_id, journal)?;
             continue;
         }
+        let mut verify_source = true;
+        if let Some((kind, path)) = source_to_verify(&journal.steps[index].planned) {
+            let kind = kind.to_string();
+            let path = path.to_owned();
+            let expected = journal.steps[index]
+                .planned
+                .fingerprint_from
+                .clone()
+                .context("step has no fingerprint")?;
+            match source_status(Path::new(&path), &expected)? {
+                SourceStatus::Ok => {}
+                SourceStatus::Changed => {
+                    let action = if proceed_all {
+                        MismatchAction::Proceed
+                    } else {
+                        ui.resolve_mismatch(&kind, &path, false)?
+                    };
+                    match action {
+                        MismatchAction::Proceed | MismatchAction::All => {
+                            proceed_all = proceed_all || action == MismatchAction::All;
+                            verify_source = false;
+                        }
+                        MismatchAction::Skip => {
+                            skip_step(journal, index);
+                            write_journal(session_id, journal)?;
+                            continue;
+                        }
+                        MismatchAction::Abort => {
+                            journal.steps[index].error = Some("aborted".into());
+                            journal.final_status = None;
+                            write_journal(session_id, journal)?;
+                            return Ok(());
+                        }
+                    }
+                }
+                SourceStatus::Missing => {
+                    let action = if skip_all_missing {
+                        MismatchAction::Skip
+                    } else {
+                        ui.resolve_mismatch(&kind, &path, true)?
+                    };
+                    match action {
+                        MismatchAction::Skip | MismatchAction::All => {
+                            skip_all_missing = skip_all_missing || action == MismatchAction::All;
+                            skip_step(journal, index);
+                            write_journal(session_id, journal)?;
+                            continue;
+                        }
+                        MismatchAction::Abort => {
+                            journal.steps[index].error = Some("aborted".into());
+                            journal.final_status = None;
+                            write_journal(session_id, journal)?;
+                            return Ok(());
+                        }
+                        MismatchAction::Proceed => {
+                            journal.steps[index].state = StepState::Failed;
+                            journal.steps[index].error =
+                                Some(format!("{kind} target is missing: {path}"));
+                            journal.final_status = None;
+                            write_journal(session_id, journal)?;
+                            return Ok(());
+                        }
+                    }
+                }
+            }
+        }
+        let mut permanent_delete = false;
+        if journal.steps[index].planned.op == PlannedKind::Trash {
+            if let Some(from) = journal.steps[index].planned.from.clone() {
+                if let Err(error) = locate_trash(Path::new(&from)) {
+                    let reason = format!("{error:#}");
+                    let action = if delete_all_untrashable {
+                        TrashFallbackAction::Delete
+                    } else {
+                        ui.resolve_unsafe_trash(&from, &reason)?
+                    };
+                    match action {
+                        TrashFallbackAction::Delete | TrashFallbackAction::All => {
+                            delete_all_untrashable =
+                                delete_all_untrashable || action == TrashFallbackAction::All;
+                            permanent_delete = true;
+                        }
+                        TrashFallbackAction::Skip => {
+                            skip_step(journal, index);
+                            write_journal(session_id, journal)?;
+                            continue;
+                        }
+                        TrashFallbackAction::Abort => {
+                            journal.steps[index].error = Some("aborted".into());
+                            journal.final_status = None;
+                            write_journal(session_id, journal)?;
+                            return Ok(());
+                        }
+                    }
+                }
+            }
+        }
+        if let Some(command) = command_line(&journal.steps[index].planned) {
+            ui.print_command(&command);
+        }
         journal.steps[index].state = StepState::InProgress;
         write_journal(session_id, journal)?;
-        if let Err(error) = apply_step(session_id, journal, index) {
+        if let Err(error) = apply_step(session_id, journal, index, verify_source, permanent_delete)
+        {
             journal.steps[index].state = StepState::Failed;
             journal.steps[index].error = Some(format!("{error:#}"));
             journal.final_status = None;
@@ -42,6 +259,82 @@ pub fn run_journal(session_id: &str, journal: &mut Journal) -> Result<()> {
         crate::model::JournalMode::Undo => JournalFinalStatus::Undone,
     });
     write_journal(session_id, journal)
+}
+
+fn source_to_verify(planned: &PlannedStep) -> Option<(&'static str, &str)> {
+    let path = planned.from.as_deref()?;
+    let kind = match planned.op {
+        PlannedKind::Trash => "Deletion",
+        PlannedKind::Copy => "Copy",
+        PlannedKind::Stage | PlannedKind::Commit => "Move",
+        PlannedKind::Mkdir | PlannedKind::Noop => return None,
+    };
+    Some((kind, path))
+}
+
+pub(crate) fn command_line(planned: &PlannedStep) -> Option<String> {
+    match planned.op {
+        PlannedKind::Mkdir => Some(format!(
+            "mkdir {}",
+            planned.mkdir_path.as_deref().unwrap_or("?")
+        )),
+        PlannedKind::Trash => Some(format!("rm {}", planned.from.as_deref().unwrap_or("?"))),
+        PlannedKind::Copy => Some(format!(
+            "cp {} {}",
+            planned.from.as_deref().unwrap_or("?"),
+            planned.to.as_deref().unwrap_or("?")
+        )),
+        PlannedKind::Stage | PlannedKind::Commit => Some(format!(
+            "mv {} {}",
+            planned.from.as_deref().unwrap_or("?"),
+            planned.to.as_deref().unwrap_or("?")
+        )),
+        PlannedKind::Noop => None,
+    }
+}
+
+enum SourceStatus {
+    Ok,
+    Changed,
+    Missing,
+}
+
+fn source_status(path: &Path, expected: &crate::model::SourceFingerprint) -> Result<SourceStatus> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return Ok(SourceStatus::Missing);
+        }
+        Err(error) => {
+            return Err(error).with_context(|| format!("stat {}", path.display()));
+        }
+    };
+    let actual = if metadata.file_type().is_symlink() {
+        SourceKind::Symlink
+    } else {
+        SourceKind::File
+    };
+    if actual != expected.kind {
+        return Ok(SourceStatus::Changed);
+    }
+    let live = fingerprint_from_metadata(&metadata, actual);
+    if &live == expected {
+        Ok(SourceStatus::Ok)
+    } else {
+        Ok(SourceStatus::Changed)
+    }
+}
+
+fn skip_step(journal: &mut Journal, index: usize) {
+    let id = journal.steps[index].planned.id;
+    journal.steps[index].state = StepState::Skipped;
+    if let Some(id) = id {
+        for step in journal.steps.iter_mut().skip(index + 1) {
+            if step.planned.id == Some(id) && step.state == StepState::Pending {
+                step.state = StepState::Skipped;
+            }
+        }
+    }
 }
 
 fn reconcile_applied(journal: &mut Journal, index: usize) -> Result<bool> {
@@ -133,7 +426,13 @@ fn copied_content_matches(from: &Path, to: &Path, kind: SourceKind) -> Result<bo
     }
 }
 
-fn apply_step(session_id: &str, journal: &mut Journal, index: usize) -> Result<()> {
+fn apply_step(
+    session_id: &str,
+    journal: &mut Journal,
+    index: usize,
+    verify_source: bool,
+    permanent_delete: bool,
+) -> Result<()> {
     let planned = journal.steps[index].planned.clone();
     match planned.op {
         PlannedKind::Mkdir => {
@@ -180,13 +479,15 @@ fn apply_step(session_id: &str, journal: &mut Journal, index: usize) -> Result<(
                     .as_deref()
                     .context("rename step has no destination")?,
             );
-            validate_source(
-                from,
-                planned
-                    .fingerprint_from
-                    .as_ref()
-                    .context("rename has no fingerprint")?,
-            )?;
+            if verify_source {
+                validate_source(
+                    from,
+                    planned
+                        .fingerprint_from
+                        .as_ref()
+                        .context("rename has no fingerprint")?,
+                )?;
+            }
             validate_parent(
                 journal,
                 index,
@@ -211,7 +512,9 @@ fn apply_step(session_id: &str, journal: &mut Journal, index: usize) -> Result<(
                 .fingerprint_from
                 .as_ref()
                 .context("copy has no fingerprint")?;
-            validate_source(from, fingerprint)?;
+            if verify_source {
+                validate_source(from, fingerprint)?;
+            }
             validate_parent(
                 journal,
                 index,
@@ -235,13 +538,19 @@ fn apply_step(session_id: &str, journal: &mut Journal, index: usize) -> Result<(
                     .as_deref()
                     .context("trash step has no source")?,
             );
-            validate_source(
-                from,
-                planned
-                    .fingerprint_from
-                    .as_ref()
-                    .context("trash has no fingerprint")?,
-            )?;
+            if verify_source {
+                validate_source(
+                    from,
+                    planned
+                        .fingerprint_from
+                        .as_ref()
+                        .context("trash has no fingerprint")?,
+                )?;
+            }
+            if permanent_delete {
+                fs::remove_file(from).with_context(|| format!("delete {}", from.display()))?;
+                return Ok(());
+            }
             let location = locate_trash(from)?;
             let key = unique_trash_key(&location, from)?;
             journal.steps[index].trash_restore_key = Some(key.clone());
@@ -322,4 +631,89 @@ fn validate_parent(
         );
     }
     Ok(())
+}
+
+#[cfg(test)]
+pub struct ScriptedExecuteUi {
+    pub commands: Vec<String>,
+    pub choice: MismatchAction,
+    pub prompts: usize,
+    pub trash_choice: TrashFallbackAction,
+    pub trash_prompts: usize,
+}
+
+#[cfg(test)]
+impl Default for ScriptedExecuteUi {
+    fn default() -> Self {
+        Self {
+            commands: Vec::new(),
+            choice: MismatchAction::Abort,
+            prompts: 0,
+            trash_choice: TrashFallbackAction::Abort,
+            trash_prompts: 0,
+        }
+    }
+}
+
+#[cfg(test)]
+impl ExecuteUi for ScriptedExecuteUi {
+    fn print_command(&mut self, command: &str) {
+        self.commands.push(command.to_owned());
+    }
+
+    fn resolve_mismatch(
+        &mut self,
+        _kind: &str,
+        _path: &str,
+        _missing: bool,
+    ) -> Result<MismatchAction> {
+        self.prompts += 1;
+        Ok(self.choice)
+    }
+
+    fn resolve_unsafe_trash(&mut self, _path: &str, _reason: &str) -> Result<TrashFallbackAction> {
+        self.trash_prompts += 1;
+        Ok(self.trash_choice)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::PlannedKind;
+
+    fn planned(op: PlannedKind, from: &str, to: Option<&str>) -> PlannedStep {
+        PlannedStep {
+            step_id: "s".into(),
+            op,
+            from: Some(from.into()),
+            to: to.map(str::to_owned),
+            id: Some(1),
+            fingerprint_from: None,
+            dest_parent_ref: None,
+            mkdir_path: None,
+        }
+    }
+
+    #[test]
+    fn command_line_uses_rm_mv_cp() {
+        assert_eq!(
+            command_line(&planned(PlannedKind::Trash, "/a", None)).as_deref(),
+            Some("rm /a")
+        );
+        assert_eq!(
+            command_line(&planned(PlannedKind::Commit, "/a", Some("/b"))).as_deref(),
+            Some("mv /a /b")
+        );
+        assert_eq!(
+            command_line(&planned(PlannedKind::Copy, "/a", Some("/b"))).as_deref(),
+            Some("cp /a /b")
+        );
+        let mkdir = PlannedStep {
+            mkdir_path: Some("/new".into()),
+            from: None,
+            ..planned(PlannedKind::Mkdir, "", None)
+        };
+        assert_eq!(command_line(&mkdir).as_deref(), Some("mkdir /new"));
+    }
 }

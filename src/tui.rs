@@ -1,18 +1,23 @@
+mod preview;
+
 use crate::config::AppConfig;
 use crate::controller::{
     ExpectedSession, expected, operation_counts, parse_session_plan, refresh_hashes,
     reset_session_plan,
 };
-use crate::diff::{DiffPart, DiffTag, path_diff_inline};
 use crate::editor::launch_editor;
 use crate::model::{OpKind, Operation, SessionRecord};
 use anyhow::Result;
 use crossterm::cursor::{Hide, Show};
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use crossterm::event::{
+    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
+    KeyModifiers, MouseEvent, MouseEventKind,
+};
 use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
+use preview::{Preview, color_style};
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Layout};
 use ratatui::style::{Color, Modifier, Style};
@@ -31,6 +36,7 @@ pub enum TuiAction {
     Cancel,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum LoopAction {
     Execute,
     Cancel,
@@ -43,6 +49,13 @@ enum Confirm {
     None,
     Trash,
     Reset,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Prompt {
+    Inactive,
+    Search,
+    Filter,
 }
 
 pub fn run_tui(session: &mut SessionRecord, config: &AppConfig) -> Result<TuiAction> {
@@ -172,6 +185,7 @@ impl Drop for TerminalCleanup {
 }
 
 fn restore_terminal() {
+    let _ = execute!(stdout(), DisableMouseCapture);
     let _ = disable_raw_mode();
     let _ = execute!(stdout(), LeaveAlternateScreen);
     let _ = execute!(stdout(), Show);
@@ -194,6 +208,7 @@ fn enter_fullscreen() -> io::Result<TerminalCleanup> {
         let _ = disable_raw_mode();
         return Err(error);
     }
+    let _ = execute!(stdout(), EnableMouseCapture);
     let _ = execute!(stdout(), Hide);
     Ok(TerminalCleanup)
 }
@@ -201,11 +216,39 @@ fn enter_fullscreen() -> io::Result<TerminalCleanup> {
 struct ViewState {
     operations: Vec<Operation>,
     parse_error: Option<String>,
-    scroll: u16,
-    page: u16,
+    preview: Preview,
     confirm: Confirm,
+    prompt: Prompt,
+    draft: String,
     status: String,
     last_check: Instant,
+}
+
+impl ViewState {
+    fn from_plan(
+        operations: Vec<Operation>,
+        parse_error: Option<String>,
+        root: &str,
+        id_width: usize,
+        no_color: bool,
+    ) -> Self {
+        let preview = Preview::from_operations(&operations, root, id_width, no_color);
+        Self {
+            operations,
+            parse_error,
+            preview,
+            confirm: Confirm::None,
+            prompt: Prompt::Inactive,
+            draft: String::new(),
+            status: String::new(),
+            last_check: Instant::now(),
+        }
+    }
+
+    fn reload_preview(&mut self, root: &str, id_width: usize, no_color: bool) {
+        self.preview
+            .reload(&self.operations, root, id_width, no_color);
+    }
 }
 
 fn event_loop(
@@ -213,19 +256,23 @@ fn event_loop(
     session: &mut SessionRecord,
     config: &AppConfig,
 ) -> Result<LoopAction> {
+    let no_color = std::env::var_os("NO_COLOR").is_some();
     let (operations, parse_error) = load_operations(session);
-    let mut state = ViewState {
+    let mut state = ViewState::from_plan(
         operations,
         parse_error,
-        scroll: 0,
-        page: 1,
-        confirm: Confirm::None,
-        status: String::new(),
-        last_check: Instant::now(),
-    };
+        &session.root,
+        session.id_width,
+        no_color,
+    );
+    let mut dirty = true;
     loop {
-        terminal.draw(|frame| render(frame, session, &mut state))?;
-        if event::poll(Duration::from_millis(150))? {
+        if dirty {
+            terminal.draw(|frame| render(frame, session, &mut state))?;
+            dirty = false;
+        }
+        let wait = Duration::from_millis(300).saturating_sub(state.last_check.elapsed());
+        if event::poll(wait)? {
             match event::read()? {
                 Event::Key(key) if key.kind != KeyEventKind::Release => {
                     if let Some(action) = handle_key(key, &mut state) {
@@ -235,7 +282,10 @@ fn event_loop(
                                     let loaded = load_operations(session);
                                     state.operations = loaded.0;
                                     state.parse_error = loaded.1;
-                                    state.scroll = 0;
+                                    state.draft.clear();
+                                    state.prompt = Prompt::Inactive;
+                                    state.reload_preview(&session.root, session.id_width, no_color);
+                                    state.preview.reset_view();
                                     state.confirm = Confirm::None;
                                     state.status = "plan reset".into();
                                 }
@@ -244,12 +294,19 @@ fn event_loop(
                                     state.status = format!("reset failed: {error:#}");
                                 }
                             }
+                            dirty = true;
                         } else {
                             return Ok(action);
                         }
+                    } else {
+                        dirty = true;
                     }
                 }
-                Event::Resize(_, _) => {}
+                Event::Resize(_, _) => dirty = true,
+                Event::Mouse(mouse) => {
+                    handle_mouse(mouse, &mut state);
+                    dirty = true;
+                }
                 _ => {}
             }
         }
@@ -260,11 +317,16 @@ fn event_loop(
                     let loaded = load_operations(session);
                     state.operations = loaded.0;
                     state.parse_error = loaded.1;
+                    state.reload_preview(&session.root, session.id_width, no_color);
                     state.status = "plan reloaded".into();
                     state.confirm = Confirm::None;
+                    dirty = true;
                 }
                 Ok(false) => {}
-                Err(error) => state.parse_error = Some(format!("{error:#}")),
+                Err(error) => {
+                    state.parse_error = Some(format!("{error:#}"));
+                    dirty = true;
+                }
             }
         }
     }
@@ -274,6 +336,16 @@ fn load_operations(session: &SessionRecord) -> (Vec<Operation>, Option<String>) 
     match parse_session_plan(session) {
         Ok(operations) => (operations, None),
         Err(error) => (Vec::new(), Some(format!("{error:#}"))),
+    }
+}
+
+fn handle_mouse(mouse: MouseEvent, state: &mut ViewState) {
+    match mouse.kind {
+        MouseEventKind::ScrollDown => state.preview.scroll_lines(3),
+        MouseEventKind::ScrollUp => state.preview.scroll_lines(-3),
+        MouseEventKind::ScrollRight => state.preview.pan(1),
+        MouseEventKind::ScrollLeft => state.preview.pan(-1),
+        _ => {}
     }
 }
 
@@ -301,6 +373,22 @@ fn handle_key(key: KeyEvent, state: &mut ViewState) -> Option<LoopAction> {
             }
         }
     }
+    if state.prompt != Prompt::Inactive {
+        return handle_prompt_key(key, state);
+    }
+    if key.modifiers.contains(KeyModifiers::CONTROL) {
+        match key.code {
+            KeyCode::Char('d') => {
+                state.preview.scroll_half_pages(1);
+                return None;
+            }
+            KeyCode::Char('u') => {
+                state.preview.scroll_half_pages(-1);
+                return None;
+            }
+            _ => return None,
+        }
+    }
     match key.code {
         KeyCode::Esc | KeyCode::Char('c' | 'q') => Some(LoopAction::Cancel),
         KeyCode::Char('o') => Some(LoopAction::OpenEditor),
@@ -324,31 +412,125 @@ fn handle_key(key: KeyEvent, state: &mut ViewState) -> Option<LoopAction> {
             state.status = "fix the plan error before executing".into();
             None
         }
+        KeyCode::Char('/') => {
+            state.prompt = Prompt::Search;
+            state.draft = state.preview.search().to_owned();
+            state.status.clear();
+            None
+        }
+        KeyCode::Char('f') => {
+            state.prompt = Prompt::Filter;
+            state.draft = state.preview.filter().to_owned();
+            state.status.clear();
+            None
+        }
+        KeyCode::Char('n') => {
+            state.status = state.preview.jump_match(true);
+            None
+        }
+        KeyCode::Char('N') => {
+            state.status = state.preview.jump_match(false);
+            None
+        }
+        KeyCode::Char('?') => {
+            state.status =
+                "j/k space/PgUp/Dn g/G C-d/u Home/End  h/l  / search  n/N  f filter  mouse wheel"
+                    .into();
+            None
+        }
         KeyCode::Down | KeyCode::Char('j') => {
-            state.scroll = state.scroll.saturating_add(1);
+            state.preview.scroll_lines(1);
             None
         }
         KeyCode::Up | KeyCode::Char('k') => {
-            state.scroll = state.scroll.saturating_sub(1);
+            state.preview.scroll_lines(-1);
             None
         }
-        KeyCode::PageDown => {
-            state.scroll = state.scroll.saturating_add(state.page.max(1));
+        KeyCode::PageDown | KeyCode::Char(' ') => {
+            state.preview.scroll_pages(1);
             None
         }
         KeyCode::PageUp => {
-            state.scroll = state.scroll.saturating_sub(state.page.max(1));
+            state.preview.scroll_pages(-1);
             None
         }
-        KeyCode::Home => {
-            state.scroll = 0;
+        KeyCode::Home | KeyCode::Char('g') => {
+            state.preview.goto_start();
             None
         }
-        KeyCode::End => {
-            state.scroll = u16::MAX;
+        KeyCode::End | KeyCode::Char('G') => {
+            state.preview.goto_end();
+            None
+        }
+        KeyCode::Right | KeyCode::Char('l') => {
+            state.preview.pan(1);
+            None
+        }
+        KeyCode::Left | KeyCode::Char('h') => {
+            state.preview.pan(-1);
             None
         }
         _ => None,
+    }
+}
+
+fn handle_prompt_key(key: KeyEvent, state: &mut ViewState) -> Option<LoopAction> {
+    if key.modifiers.contains(KeyModifiers::CONTROL) {
+        match key.code {
+            KeyCode::Char('d') => state.preview.scroll_half_pages(1),
+            KeyCode::Char('u') => state.preview.scroll_half_pages(-1),
+            _ => {}
+        }
+        return None;
+    }
+    match key.code {
+        KeyCode::Esc => {
+            match state.prompt {
+                Prompt::Search => state.preview.clear_search(),
+                Prompt::Filter => state.preview.clear_filter(),
+                Prompt::Inactive => {}
+            }
+            state.draft.clear();
+            state.prompt = Prompt::Inactive;
+            state.status.clear();
+        }
+        KeyCode::Enter => {
+            state.prompt = Prompt::Inactive;
+        }
+        KeyCode::Backspace => {
+            state.draft.pop();
+            apply_draft(state);
+        }
+        KeyCode::Down => state.preview.scroll_lines(1),
+        KeyCode::Up => state.preview.scroll_lines(-1),
+        KeyCode::PageDown => state.preview.scroll_pages(1),
+        KeyCode::PageUp => state.preview.scroll_pages(-1),
+        KeyCode::Home => state.preview.goto_start(),
+        KeyCode::End => state.preview.goto_end(),
+        KeyCode::Right => state.preview.pan(1),
+        KeyCode::Left => state.preview.pan(-1),
+        KeyCode::Char(c)
+            if !key
+                .modifiers
+                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+        {
+            state.draft.push(c);
+            apply_draft(state);
+        }
+        _ => {}
+    }
+    None
+}
+
+fn apply_draft(state: &mut ViewState) {
+    match state.prompt {
+        Prompt::Search => {
+            state.status = state.preview.set_search(state.draft.clone());
+        }
+        Prompt::Filter => {
+            state.preview.set_filter(state.draft.clone());
+        }
+        Prompt::Inactive => {}
     }
 }
 
@@ -379,7 +561,7 @@ fn render(frame: &mut Frame<'_>, session: &SessionRecord, state: &mut ViewState)
             session.plan_path.clone(),
             Style::default().add_modifier(Modifier::DIM),
         )),
-        Line::from("[e] execute  [o] editor  [r] reset  [c/q] cancel  [j/k] scroll"),
+        header_keys(state),
     ];
     if state.confirm == Confirm::Trash {
         header.push(Line::from(Span::styled(
@@ -416,173 +598,85 @@ fn render(frame: &mut Frame<'_>, session: &SessionRecord, state: &mut ViewState)
     }
     frame.render_widget(Paragraph::new(header).wrap(Wrap { trim: false }), chunks[0]);
 
-    let lines = operation_lines(
-        &state.operations,
-        &session.root,
-        session.id_width,
-        chunks[1].width,
-        no_color,
+    state.preview.set_viewport(
+        chunks[1].height.max(1) as usize,
+        chunks[1].width.max(1) as usize,
     );
-    let line_count = lines.len();
-    let list_height = chunks[1].height.max(1);
-    state.page = list_height;
-    let max_scroll = line_count.saturating_sub(list_height as usize) as u16;
-    state.scroll = state.scroll.min(max_scroll);
-    let scroll = state.scroll;
-    frame.render_widget(
-        Paragraph::new(Text::from(lines))
-            .wrap(Wrap { trim: false })
-            .scroll((scroll, 0)),
-        chunks[1],
-    );
+    let lines = state.preview.visible_lines(no_color);
+    frame.render_widget(Paragraph::new(Text::from(lines)), chunks[1]);
 
-    let footer = if state.status.is_empty() {
-        if max_scroll > 0 {
-            format!("line {} / {}", scroll + 1, line_count)
-        } else {
-            String::new()
-        }
-    } else {
-        state.status.clone()
-    };
     frame.render_widget(
         Paragraph::new(Span::styled(
-            footer,
+            footer(state),
             Style::default().add_modifier(Modifier::DIM),
         )),
         chunks[2],
     );
 }
 
-fn operation_lines(
-    operations: &[Operation],
-    root: &str,
-    id_width: usize,
-    width: u16,
-    no_color: bool,
-) -> Vec<Line<'static>> {
-    let visible: Vec<&Operation> = operations
-        .iter()
-        .filter(|operation| !matches!(operation.kind, OpKind::Noop | OpKind::Skip))
-        .collect();
-    let mut groups: Vec<(String, Vec<&Operation>)> = Vec::new();
-    for operation in visible {
-        let directory = parent_relative(&operation.from, root);
-        match groups.last_mut() {
-            Some((current, items)) if current == &directory => items.push(operation),
-            _ => groups.push((directory, vec![operation])),
-        }
+fn header_keys(state: &ViewState) -> Line<'static> {
+    match state.prompt {
+        Prompt::Search => prompt_line("Search", &state.draft),
+        Prompt::Filter => prompt_line("Filter", &state.draft),
+        Prompt::Inactive => Line::from(
+            "[e] execute  [o] editor  [r] reset  [c/q] cancel  [/] search  [f] filter  [?] keys",
+        ),
     }
-    let mut lines = Vec::new();
-    for (directory, items) in groups {
-        lines.push(directory_header(&directory, items.len(), width, no_color));
-        for operation in items {
-            lines.push(operation_line(operation, root, id_width, no_color));
-        }
-    }
-    lines
 }
 
-fn directory_header(directory: &str, count: usize, width: u16, no_color: bool) -> Line<'static> {
-    let text = format!(" {directory} {count}");
-    let width = width as usize;
-    let padded = match width.checked_sub(text.chars().count()) {
-        Some(padding) if padding > 0 => format!("{text}{}", " ".repeat(padding)),
-        _ => text,
-    };
-    let style = if no_color {
-        Style::default().add_modifier(Modifier::BOLD)
-    } else {
-        Style::default()
-            .fg(Color::LightBlue)
-            .bg(Color::DarkGray)
-            .add_modifier(Modifier::BOLD)
-    };
-    Line::from(Span::styled(padded, style))
+fn prompt_line(label: &str, draft: &str) -> Line<'static> {
+    Line::from(vec![
+        Span::raw(format!("{label}: {draft}")),
+        Span::styled("█", Style::default().add_modifier(Modifier::REVERSED)),
+        Span::styled(
+            "  Enter keep  Esc clear",
+            Style::default().add_modifier(Modifier::DIM),
+        ),
+    ])
 }
 
-fn operation_line(
-    operation: &Operation,
-    root: &str,
-    id_width: usize,
-    no_color: bool,
-) -> Line<'static> {
-    let mut spans = vec![Span::styled(
-        format!(" {:0width$}  ", operation.id, width = id_width.max(1)),
-        Style::default().add_modifier(Modifier::DIM),
-    )];
-    match operation.kind {
-        OpKind::Trash => {
-            spans.push(Span::styled(
-                display_path(&operation.from, root),
-                color_style(Color::Red, no_color).add_modifier(Modifier::BOLD),
+fn footer(state: &ViewState) -> String {
+    if !state.status.is_empty() {
+        return state.status.clone();
+    }
+    if state.prompt != Prompt::Inactive {
+        return "type to match  arrows scroll".into();
+    }
+    let preview = &state.preview;
+    let total = preview.row_count();
+    if total == 0 {
+        return if preview.filter().is_empty() {
+            String::new()
+        } else {
+            "no rows match filter".into()
+        };
+    }
+    let start = preview.scroll() + 1;
+    let end = (preview.scroll() + preview.page()).min(total);
+    let mut parts = vec![format!("line {start}–{end} / {total}")];
+    if !preview.filter().is_empty() {
+        parts.push(format!("filter {}", preview.filter()));
+    }
+    if !preview.search().is_empty() {
+        if preview.match_count() == 0 {
+            parts.push("no matches".into());
+        } else {
+            parts.push(format!(
+                "match {} / {}",
+                preview.match_index() + 1,
+                preview.match_count()
             ));
         }
-        OpKind::Move | OpKind::Copy => {
-            let from = display_path(&operation.from, root);
-            let to = display_path(&operation.to, root);
-            spans.extend(parts_to_spans(path_diff_inline(&from, &to), no_color));
-        }
-        OpKind::Noop | OpKind::Skip => {}
     }
-    Line::from(spans)
-}
-
-fn parent_relative(path: &str, root: &str) -> String {
-    let parent = Path::new(path).parent().unwrap_or_else(|| Path::new("/"));
-    if parent == Path::new(root) {
-        ".".to_owned()
-    } else {
-        parent.strip_prefix(root).map_or_else(
-            |_| parent.to_string_lossy().into_owned(),
-            |relative| relative.to_string_lossy().into_owned(),
-        )
+    if preview.max_line_chars() > preview.list_width() {
+        parts.push(format!("col {}", preview.h_scroll() + 1));
     }
-}
-
-fn display_path(path: &str, root: &str) -> String {
-    let root = root.trim_end_matches('/');
-    path.strip_prefix(root)
-        .and_then(|rest| rest.strip_prefix('/'))
-        .filter(|rest| !rest.is_empty())
-        .unwrap_or(path)
-        .to_owned()
-}
-
-fn parts_to_spans(parts: Vec<DiffPart>, no_color: bool) -> Vec<Span<'static>> {
-    parts
-        .into_iter()
-        .map(|part| {
-            let style = match part.tag {
-                DiffTag::Equal => Style::default(),
-                DiffTag::Delete => color_style(Color::Red, no_color)
-                    .add_modifier(Modifier::BOLD)
-                    .add_modifier(Modifier::CROSSED_OUT),
-                DiffTag::Insert => color_style(Color::Green, no_color).add_modifier(Modifier::BOLD),
-            };
-            Span::styled(part.text, style)
-        })
-        .collect()
-}
-
-fn color_style(color: Color, no_color: bool) -> Style {
-    if no_color {
-        Style::default()
-    } else {
-        Style::default().fg(color)
-    }
+    parts.join("  ·  ")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn line_text(line: &Line<'_>) -> String {
-        line.spans
-            .iter()
-            .map(|span| span.content.as_ref())
-            .collect()
-    }
 
     fn op(id: u64, kind: OpKind, from: &str, to: &str) -> Operation {
         Operation {
@@ -593,9 +687,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn groups_by_directory_with_padded_ids_and_inline_diff() {
-        let operations = vec![
+    fn sample_ops() -> Vec<Operation> {
+        vec![
             op(
                 1,
                 OpKind::Move,
@@ -609,31 +702,89 @@ mod tests {
                 "/music/_NEW20/new-two.mp3",
             ),
             op(12, OpKind::Trash, "/music/other/gone.mp3", ""),
-        ];
-        let lines = operation_lines(&operations, "/music", 4, 40, true);
-        let text: Vec<String> = lines.iter().map(line_text).collect();
-        assert!(text[0].starts_with(" _NEW20 2"));
-        assert!(text[1].starts_with(" 0001  "));
-        assert!(text[1].contains("old"));
-        assert!(text[1].contains("new"));
-        assert!(!text[1].contains('\n'));
-        assert!(text[2].starts_with(" 0002  "));
-        assert!(text[3].starts_with(" other 1"));
-        assert_eq!(text[4].trim_start(), "0012  other/gone.mp3");
-        assert_eq!(lines.len(), 5);
+        ]
+    }
+
+    fn state_from(operations: Vec<Operation>) -> ViewState {
+        let mut state = ViewState::from_plan(operations, None, "/music", 4, true);
+        state.preview.set_viewport(10, 40);
+        state
+    }
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    fn ctrl(c: char) -> KeyEvent {
+        KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL)
     }
 
     #[test]
-    fn skips_noop_and_skip_ops() {
-        let operations = vec![
-            op(1, OpKind::Noop, "/music/a.txt", "/music/a.txt"),
-            op(2, OpKind::Skip, "/music/b.txt", "/music/b.txt"),
-            op(3, OpKind::Move, "/music/old.txt", "/music/new.txt"),
-        ];
-        let lines = operation_lines(&operations, "/music", 1, 20, true);
-        assert_eq!(lines.len(), 2);
-        assert!(line_text(&lines[0]).starts_with(" . 1"));
-        assert!(line_text(&lines[1]).contains("old"));
-        assert!(line_text(&lines[1]).contains("new"));
+    fn g_and_end_jump_the_list() {
+        let mut state = state_from(sample_ops());
+        state.preview.set_viewport(2, 40);
+        assert_eq!(handle_key(key(KeyCode::Char('G')), &mut state), None);
+        assert_eq!(
+            state.preview.scroll(),
+            state.preview.row_count().saturating_sub(2)
+        );
+        assert_eq!(handle_key(key(KeyCode::Char('g')), &mut state), None);
+        assert_eq!(state.preview.scroll(), 0);
+        assert_eq!(handle_key(key(KeyCode::End), &mut state), None);
+        assert_eq!(
+            state.preview.scroll(),
+            state.preview.row_count().saturating_sub(2)
+        );
+        assert_eq!(handle_key(key(KeyCode::Home), &mut state), None);
+        assert_eq!(state.preview.scroll(), 0);
+    }
+
+    #[test]
+    fn ctrl_d_and_u_move_half_page() {
+        let mut state = state_from(sample_ops());
+        state.preview.set_viewport(2, 40);
+        handle_key(ctrl('d'), &mut state);
+        assert_eq!(state.preview.scroll(), 1);
+        handle_key(ctrl('u'), &mut state);
+        assert_eq!(state.preview.scroll(), 0);
+    }
+
+    #[test]
+    fn slash_starts_search_and_n_walks_matches() {
+        let mut state = state_from(sample_ops());
+        assert_eq!(handle_key(key(KeyCode::Char('/')), &mut state), None);
+        assert_eq!(state.prompt, Prompt::Search);
+        handle_key(key(KeyCode::Char('o')), &mut state);
+        handle_key(key(KeyCode::Char('l')), &mut state);
+        handle_key(key(KeyCode::Char('d')), &mut state);
+        assert!(state.preview.match_count() > 0);
+        handle_key(key(KeyCode::Enter), &mut state);
+        assert_eq!(state.prompt, Prompt::Inactive);
+        let first = state.preview.match_index();
+        handle_key(key(KeyCode::Char('n')), &mut state);
+        assert_ne!(state.preview.match_index(), first);
+    }
+
+    #[test]
+    fn filter_prompt_hides_non_matching_rows() {
+        let mut state = state_from(sample_ops());
+        handle_key(key(KeyCode::Char('f')), &mut state);
+        for c in ['g', 'o', 'n', 'e'] {
+            handle_key(key(KeyCode::Char(c)), &mut state);
+        }
+        assert_eq!(state.preview.filter(), "gone");
+        assert_eq!(state.preview.row_count(), 2);
+        handle_key(key(KeyCode::Esc), &mut state);
+        assert!(state.preview.filter().is_empty());
+        assert_eq!(state.preview.row_count(), 5);
+    }
+
+    #[test]
+    fn execute_still_sees_unfiltered_trash() {
+        let mut state = state_from(sample_ops());
+        state.preview.set_filter("old-one".into());
+        assert_eq!(state.preview.row_count(), 2);
+        assert_eq!(handle_key(key(KeyCode::Char('e')), &mut state), None);
+        assert_eq!(state.confirm, Confirm::Trash);
     }
 }

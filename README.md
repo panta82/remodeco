@@ -27,7 +27,7 @@ F03	:	/home/joesmith/Pictures/sis.jpg
 
 ![docs_diff.png](misc/docs_diff.png)
 
-6️⃣ Press `e` to execute, `o` to re-open the editor, `r` to reset the plan, or `c`/`q` to cancel.
+6️⃣ Review in the fullscreen preview: `e` execute, `o` re-open the editor, `r` reset, `c`/`q` cancel. `/` search, `n`/`N` next/previous match, `f` filter. `j`/`k` or arrows scroll, `g`/`G` or Home/End jump, `Ctrl-d`/`u` half-page, `?` lists keys. Filter and search only change what you see — execute still applies the whole plan.
 
 If you accept the changes, your files will be renamed, copied, or moved to trash.
 

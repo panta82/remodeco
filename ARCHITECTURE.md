@@ -20,6 +20,12 @@ zero-padded numeric prefixes aligned to the plan's id width. Styling is
 restricted to basic colors, bold, dim, and strikethrough, and is disabled by
 `NO_COLOR`.
 
+Myers runs when the plan is loaded or reloaded, not on every frame. The TUI
+keeps those styled lines and paints only the viewport, so large change sets
+stay responsive. Search (`/`, `n`/`N`) and filter (`f`) are view-only; execute
+still applies the whole plan. Movement follows pager conventions (`j`/`k`,
+`g`/`G`, Home/End, `Ctrl-d`/`u`, arrows, mouse wheel).
+
 References used for the decision:
 
 - [Codex Rust workspace overview](https://github.com/openai/codex/blob/main/codex-rs/README.md)
@@ -46,12 +52,16 @@ line-oriented prompt with the same execute/editor/cancel flow.
 - `schedule`: validate operations and order mkdir/stage/commit/copy/trash steps.
 - `execute`: journal-before-mutation execution, desktop trash, and undo.
 - `editor`: editor discovery and GUI/multiplexer/attached editor lifecycle.
-- `tui`: fullscreen alternate-screen diff preview and execute/cancel/re-open.
+- `tui`: fullscreen alternate-screen shell (event loop, keys, execute/cancel/re-open).
+  The virtualized change list lives in `tui/preview.rs`.
 
 ## Safety invariants
 
 - Plans are parsed, never evaluated as shell.
 - Sources are fingerprinted at scan time and checked immediately before mutation.
+  A changed file offers proceed / skip / all / quit. A missing file offers
+  skip / all / quit (all skips remaining missing sources). If trash cannot
+  be used, the TTY offers permanent delete / skip / all / quit.
 - Renames and copies are no-clobber operations.
 - Destination parent identity is captured while scheduling and checked while
   executing, reducing the window for symlink or directory-swap races.

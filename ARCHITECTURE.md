@@ -50,7 +50,8 @@ line-oriented prompt with the same execute/editor/cancel flow.
 - `scan`: deterministic filesystem scan plus source fingerprints.
 - `session`: compatible session, manifest, journal, locking, and atomic storage.
 - `schedule`: validate operations and order mkdir/stage/commit/copy/trash steps.
-- `execute`: journal-before-mutation execution, desktop trash, and undo.
+- `execute`: journal-before-mutation execution, desktop trash, empty source
+  directory cleanup, and undo.
 - `editor`: editor discovery and GUI/multiplexer/attached editor lifecycle.
 - `tui`: fullscreen alternate-screen shell (event loop, keys, execute/cancel/re-open).
   The virtualized change list lives in `tui/preview.rs`.
@@ -63,6 +64,9 @@ line-oriented prompt with the same execute/editor/cancel flow.
   skip / all / quit (all skips remaining missing sources). If trash cannot
   be used, the TTY offers permanent delete / skip / all / quit.
 - Renames and copies are no-clobber operations.
+- After a move or trash, empty source directories under the session root are
+  removed with `rmdir` (never recursive). The session root itself is kept.
+  Undo recreates parents when restoring files.
 - Destination parent identity is captured while scheduling and checked while
   executing, reducing the window for symlink or directory-swap races.
 - Every step is persisted before and after mutation; interrupted runs remain

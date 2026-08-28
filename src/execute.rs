@@ -124,7 +124,12 @@ impl ExecuteUi for QuietExecuteUi {
     }
 }
 
-pub fn run_journal(session_id: &str, journal: &mut Journal, ui: &mut dyn ExecuteUi) -> Result<()> {
+pub fn run_journal(
+    session_id: &str,
+    journal: &mut Journal,
+    root: &str,
+    ui: &mut dyn ExecuteUi,
+) -> Result<()> {
     let mut proceed_all = false;
     let mut skip_all_missing = false;
     let mut delete_all_untrashable = false;
@@ -253,6 +258,7 @@ pub fn run_journal(session_id: &str, journal: &mut Journal, ui: &mut dyn Execute
         }
         journal.steps[index].state = StepState::Committed;
         write_journal(session_id, journal)?;
+        prune_empty_source_dirs(journal, index, root, ui);
     }
     journal.final_status = Some(match journal.mode {
         crate::model::JournalMode::Execute => JournalFinalStatus::Executed,
@@ -323,6 +329,59 @@ fn source_status(path: &Path, expected: &crate::model::SourceFingerprint) -> Res
     } else {
         Ok(SourceStatus::Changed)
     }
+}
+
+fn prune_empty_source_dirs(journal: &Journal, index: usize, root: &str, ui: &mut dyn ExecuteUi) {
+    let planned = &journal.steps[index].planned;
+    if !matches!(
+        planned.op,
+        PlannedKind::Stage | PlannedKind::Commit | PlannedKind::Trash
+    ) {
+        return;
+    }
+    let Some(from) = planned.from.as_deref() else {
+        return;
+    };
+    remove_empty_ancestors(Path::new(from), Path::new(root), ui);
+}
+
+fn remove_empty_ancestors(leaf: &Path, root: &Path, ui: &mut dyn ExecuteUi) {
+    let mut current = match leaf.parent() {
+        Some(parent) => parent.to_path_buf(),
+        None => return,
+    };
+    loop {
+        if current == root {
+            break;
+        }
+        if current.strip_prefix(root).is_err() {
+            break;
+        }
+        if !is_safe_empty_dir(&current) {
+            break;
+        }
+        match fs::remove_dir(&current) {
+            Ok(()) => ui.print_command(&format!("rmdir {}", current.display())),
+            Err(_) => break,
+        }
+        match current.parent() {
+            Some(parent) => current = parent.to_path_buf(),
+            None => break,
+        }
+    }
+}
+
+fn is_safe_empty_dir(path: &Path) -> bool {
+    let Ok(metadata) = fs::symlink_metadata(path) else {
+        return false;
+    };
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        return false;
+    }
+    let Ok(mut entries) = fs::read_dir(path) else {
+        return false;
+    };
+    entries.next().is_none()
 }
 
 fn skip_step(journal: &mut Journal, index: usize) {
@@ -715,5 +774,52 @@ mod tests {
             ..planned(PlannedKind::Mkdir, "", None)
         };
         assert_eq!(command_line(&mkdir).as_deref(), Some("mkdir /new"));
+    }
+
+    #[test]
+    fn rmdir_walks_empty_ancestors_and_keeps_root() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("root");
+        let nested = root.join("old").join("album");
+        fs::create_dir_all(&nested).unwrap();
+        let file = nested.join("track.mp3");
+        fs::write(&file, "x").unwrap();
+        fs::remove_file(&file).unwrap();
+        let mut ui = QuietExecuteUi;
+        remove_empty_ancestors(&file, &root, &mut ui);
+        assert!(!nested.exists());
+        assert!(!root.join("old").exists());
+        assert!(root.exists());
+    }
+
+    #[test]
+    fn rmdir_stops_when_a_directory_still_has_files() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("root");
+        let album = root.join("album");
+        fs::create_dir_all(&album).unwrap();
+        fs::write(album.join("keep.txt"), "k").unwrap();
+        let gone = album.join("gone.txt");
+        fs::write(&gone, "g").unwrap();
+        fs::remove_file(&gone).unwrap();
+        let mut ui = QuietExecuteUi;
+        remove_empty_ancestors(&gone, &root, &mut ui);
+        assert!(album.exists());
+        assert!(album.join("keep.txt").exists());
+    }
+
+    #[test]
+    fn rmdir_prints_removed_paths() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("root");
+        let album = root.join("album");
+        fs::create_dir_all(&album).unwrap();
+        let file = album.join("t.mp3");
+        fs::write(&file, "x").unwrap();
+        fs::remove_file(&file).unwrap();
+        let mut ui = ScriptedExecuteUi::default();
+        remove_empty_ancestors(&file, &root, &mut ui);
+        assert_eq!(ui.commands, vec![format!("rmdir {}", album.display())]);
+        assert!(!album.exists());
     }
 }

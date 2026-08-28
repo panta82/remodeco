@@ -337,7 +337,7 @@ pub fn execute_session(
     session.active_journal_id = Some(journal.journal_id.clone());
     session.status = SessionStatus::Executing;
     write_session(session)?;
-    run_journal(&session.id, &mut journal, ui)?;
+    run_journal(&session.id, &mut journal, &session.root, ui)?;
     if journal.final_status == Some(JournalFinalStatus::Executed) {
         session.status = SessionStatus::Executed;
         session.stats.changes = journal
@@ -433,7 +433,7 @@ pub fn undo_session(session: &mut SessionRecord, ui: &mut dyn ExecuteUi) -> Resu
     session.active_journal_id = Some(journal.journal_id.clone());
     session.status = SessionStatus::Undoing;
     write_session(session)?;
-    run_journal(&session.id, &mut journal, ui)?;
+    run_journal(&session.id, &mut journal, &session.root, ui)?;
     session.status = if journal.final_status == Some(JournalFinalStatus::Undone) {
         for step in &active.steps {
             if step.planned.op == PlannedKind::Trash {
@@ -1092,5 +1092,87 @@ mod tests {
                 .all(|step| step.state == crate::model::StepState::Committed
                     && step.trash_restore_key.is_none())
         );
+    }
+
+    #[test]
+    fn moving_all_files_removes_empty_source_dir() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let _restore = isolated_environment(&temp);
+        let root = temp.path().join("files");
+        fs::create_dir(&root).unwrap();
+        let album = root.join("old-album");
+        fs::create_dir(&album).unwrap();
+        let a = album.join("a.txt");
+        let b = album.join("b.txt");
+        fs::write(&a, "A").unwrap();
+        fs::write(&b, "B").unwrap();
+        let dest_dir = root.join("artist").join("album");
+        let a_to = dest_dir.join("a.txt");
+        let b_to = dest_dir.join("b.txt");
+
+        let mut opened = create_session(&root, SessionMode::Move, &config(), true).unwrap();
+        let raw = fs::read_to_string(&opened.session.plan_path).unwrap();
+        let edited = raw
+            .replace(
+                &format!("\t:\t{}\n", path_text(&a).unwrap()),
+                &format!("\t:\t{}\n", path_text(&a_to).unwrap()),
+            )
+            .replace(
+                &format!("\t:\t{}\n", path_text(&b).unwrap()),
+                &format!("\t:\t{}\n", path_text(&b_to).unwrap()),
+            );
+        fs::write(&opened.session.plan_path, edited).unwrap();
+        refresh_hashes(&mut opened.session).unwrap();
+
+        let snapshot = expected(&opened.session);
+        let mut ui = crate::execute::ScriptedExecuteUi::default();
+        let journal = execute_session(&mut opened.session, &snapshot, &mut ui).unwrap();
+        assert_eq!(journal.final_status, Some(JournalFinalStatus::Executed));
+        assert!(!album.exists());
+        assert!(root.exists());
+        assert_eq!(fs::read_to_string(&a_to).unwrap(), "A");
+        assert_eq!(fs::read_to_string(&b_to).unwrap(), "B");
+        assert!(
+            ui.commands
+                .iter()
+                .any(|line| line == &format!("rmdir {}", album.display()))
+        );
+
+        let undo = undo_session(&mut opened.session, &mut ui).unwrap();
+        assert_eq!(undo.final_status, Some(JournalFinalStatus::Undone));
+        assert_eq!(fs::read_to_string(&a).unwrap(), "A");
+        assert_eq!(fs::read_to_string(&b).unwrap(), "B");
+        assert!(album.exists());
+    }
+
+    #[test]
+    fn copy_does_not_remove_source_dir() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let _restore = isolated_environment(&temp);
+        let root = temp.path().join("files");
+        fs::create_dir(&root).unwrap();
+        let album = root.join("album");
+        fs::create_dir(&album).unwrap();
+        let source = album.join("song.mp3");
+        fs::write(&source, "music").unwrap();
+        let dest = root.join("copy").join("song.mp3");
+
+        let mut opened = create_session(&root, SessionMode::Copy, &config(), true).unwrap();
+        let raw = fs::read_to_string(&opened.session.plan_path).unwrap();
+        let edited = raw.replace(
+            &format!("\t:\t{}\n", path_text(&source).unwrap()),
+            &format!("\t:\t{}\n", path_text(&dest).unwrap()),
+        );
+        fs::write(&opened.session.plan_path, edited).unwrap();
+        refresh_hashes(&mut opened.session).unwrap();
+
+        let snapshot = expected(&opened.session);
+        let mut ui = crate::execute::QuietExecuteUi;
+        execute_session(&mut opened.session, &snapshot, &mut ui).unwrap();
+        assert!(album.exists());
+        assert!(source.exists());
+        assert_eq!(fs::read_to_string(&dest).unwrap(), "music");
     }
 }

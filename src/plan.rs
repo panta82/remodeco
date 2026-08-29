@@ -120,7 +120,7 @@ pub fn render_plan(
         };
         if current_parent.as_deref() != Some(&relative) {
             current_parent = Some(relative.clone());
-            out.push_str(&format!("\n# {relative}\n"));
+            out.push_str(&format!("\n# ./{relative}\n\n"));
         }
         out.push_str(&format!(
             "F{:0width$}\t:\t{dest}\n",

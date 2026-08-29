@@ -2,6 +2,15 @@ use crate::config::{EditorMode, PlanFormat};
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
+/// Session ids name a directory under the session store, so they must stay a single
+/// path component. This is the only place untrusted ids enter remodeco.
+fn parse_session_id(raw: &str) -> Result<String, String> {
+    if raw.is_empty() || raw.contains(['/', '\\']) || raw == "." || raw == ".." {
+        return Err("must be a session id, not a path".to_owned());
+    }
+    Ok(raw.to_owned())
+}
+
 #[derive(Clone, Debug, Parser)]
 #[command(
     name = "remodeco",
@@ -52,12 +61,8 @@ pub struct Cli {
     pub new_session: bool,
 
     /// Open an existing session.
-    #[arg(long, value_name = "ID")]
+    #[arg(long, value_name = "ID", value_parser = parse_session_id)]
     pub session: Option<String>,
-
-    /// Print sessions and exit.
-    #[arg(long)]
-    pub list_sessions: bool,
 
     /// Validate and print the schedule without mutating files.
     #[arg(long)]
@@ -78,8 +83,30 @@ pub struct Cli {
 
 #[derive(Clone, Debug, Subcommand)]
 pub enum Command {
+    /// List sessions and exit.
+    List {},
+
+    /// Delete a session and its undo history.
+    Delete {
+        #[arg(value_parser = parse_session_id)]
+        session_id: String,
+
+        /// Delete even if the session could still be undone.
+        #[arg(long)]
+        force: bool,
+    },
+
+    /// Execute a prepared session.
+    Execute {
+        #[arg(value_parser = parse_session_id)]
+        session_id: String,
+    },
+
     /// Undo an executed session.
-    Undo { session_id: String },
+    Undo {
+        #[arg(value_parser = parse_session_id)]
+        session_id: String,
+    },
 }
 
 impl clap::ValueEnum for EditorMode {
@@ -98,7 +125,7 @@ impl clap::ValueEnum for EditorMode {
 
 impl clap::ValueEnum for PlanFormat {
     fn value_variants<'a>() -> &'a [Self] {
-        &[Self::Properties, Self::Yaml, Self::PlainText]
+        Self::ALL
     }
 
     fn to_possible_value(&self) -> Option<clap::builder::PossibleValue> {
@@ -107,5 +134,34 @@ impl clap::ValueEnum for PlanFormat {
             Self::Yaml => "yaml",
             Self::PlainText => "plain-text",
         }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_execute_session_command() {
+        let cli = Cli::try_parse_from(["remodeco", "execute", "session-123"]).unwrap();
+
+        assert!(matches!(
+            cli.command,
+            Some(Command::Execute { session_id }) if session_id == "session-123"
+        ));
+    }
+
+    #[test]
+    fn rejects_session_ids_that_are_paths() {
+        for raw in ["../escape", "a/b", "..", ".", ""] {
+            assert!(
+                Cli::try_parse_from(["remodeco", "execute", raw]).is_err(),
+                "accepted {raw:?}"
+            );
+            assert!(
+                Cli::try_parse_from(["remodeco", "--session", raw]).is_err(),
+                "accepted {raw:?}"
+            );
+        }
     }
 }

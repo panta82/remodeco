@@ -1,5 +1,6 @@
 use crate::model::TrashKey;
 use crate::native::rename_no_replace;
+use crate::util::path_text;
 use anyhow::{Context, Result, bail};
 use chrono::Local;
 use directories::BaseDirs;
@@ -253,8 +254,4 @@ pub fn restore_trash(key: &TrashKey) -> Result<()> {
         }
     }
     Ok(())
-}
-
-fn path_text(path: &Path) -> Result<String> {
-    Ok(path.to_str().context("path is not UTF-8")?.to_owned())
 }

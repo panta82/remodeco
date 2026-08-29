@@ -131,15 +131,6 @@ pub fn render_plan(
     out
 }
 
-pub fn is_legacy_plan_text(raw: &str) -> bool {
-    raw.lines().any(|line| {
-        let trimmed = line.trim_start();
-        trimmed.starts_with("- `{")
-            || trimmed.starts_with('>')
-            || parse_colon_space_entry_line(line).is_some()
-    })
-}
-
 fn is_ignorable_line(line: &str) -> bool {
     let trimmed = line.trim();
     trimmed.is_empty()
@@ -183,10 +174,10 @@ pub fn parse_plan(raw: &str) -> std::result::Result<ParsedPlan, PlanError> {
                 break;
             }
             let line = raw_lines[index];
-            if !is_ignorable_line(line) {
-                if let Some((key, value)) = line.split_once(':') {
-                    fields.insert(key.trim().to_owned(), value.trim().to_owned());
-                }
+            if !is_ignorable_line(line)
+                && let Some((key, value)) = line.split_once(':')
+            {
+                fields.insert(key.trim().to_owned(), value.trim().to_owned());
             }
             index += 1;
         }
@@ -451,8 +442,6 @@ mod tests {
         let parsed = parse_plan("F1: /tmp/a\nF2:\n").unwrap();
         assert_eq!(parsed.bullets[0].destination, "/tmp/a");
         assert_eq!(parsed.bullets[1].kind, BulletKind::Trash);
-        assert!(is_legacy_plan_text("F1: /tmp/a\n"));
-        assert!(!is_legacy_plan_text("F1\t:\t/tmp/a\n"));
     }
 
     #[test]
@@ -489,7 +478,6 @@ mod tests {
         let raw = "---\nremodeco: 1\nid: s\nroot: '/tmp/r'\n---\n\n\
              > Edit the path after `{id}` (the tab) to **rename/move**.\n\
              # /tmp/r\n\n## sub\n- `{01}`\t/tmp/r/You've `made` it.mp3\n";
-        assert!(is_legacy_plan_text(raw));
         let parsed = parse_plan(raw).unwrap();
         assert!(parsed.unknown_lines.is_empty());
         assert_eq!(parsed.bullets.len(), 1);

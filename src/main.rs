@@ -1,17 +1,20 @@
 use anyhow::{Context, Result, bail};
+use chrono::DateTime;
 use clap::Parser;
+use comfy_table::{Table, presets::UTF8_FULL_CONDENSED};
 use remodeco::cli::{Cli, Command};
 use remodeco::config::load_config;
 use remodeco::controller::{
-    create_session, dry_run, execute_session, normalize_session_plan, open_session, refresh_hashes,
-    undo_session,
+    create_session, delete_session, dry_run, execute_prepared_session, execute_session,
+    normalize_session_plan, open_session, refresh_hashes, undo_session,
 };
 use remodeco::editor::launch_editor;
 use remodeco::execute::StdioExecuteUi;
 use remodeco::model::{JournalFinalStatus, SessionMode};
 use remodeco::schedule::format_schedule;
-use remodeco::session::{list_session_ids, list_unfinished, read_session, write_session};
+use remodeco::store::{list_session_ids, list_unfinished, read_session, write_session};
 use remodeco::tui::{TuiAction, run_tui};
+use remodeco::util::path_text;
 use std::fs;
 use std::io::{IsTerminal, stdin, stdout};
 use std::path::{Path, PathBuf};
@@ -35,28 +38,76 @@ fn run() -> Result<()> {
         );
     }
 
-    if cli.list_sessions {
-        for id in list_session_ids()? {
-            match read_session(&id) {
-                Ok(session) => println!(
-                    "{}\t{}\t{}\t{}",
-                    session.id, session.status, session.mode, session.root
-                ),
-                Err(_) => println!("{id}\t(unreadable)"),
+    if let Some(command) = &cli.command {
+        match command {
+            Command::List {} => {
+                let mut table = Table::new();
+                table.load_preset(UTF8_FULL_CONDENSED);
+                table.set_header(vec!["ID", "Status", "Root", "Created", "Changes"]);
+
+                for id in list_session_ids()? {
+                    match read_session(&id) {
+                        Ok(session) => {
+                            let date_str = DateTime::parse_from_rfc3339(&session.created_at)
+                                .map(|date| date.format("%Y-%m-%d %H:%M:%S").to_string())
+                                .unwrap_or("".to_string());
+
+                            table.add_row(vec![
+                                session.id,
+                                session.status.to_string(),
+                                session.root,
+                                date_str,
+                                session.stats.changes.to_string(),
+                            ]);
+                        }
+                        Err(_) => {
+                            table.add_row(vec![
+                                id,
+                                "corrupted".to_string(),
+                                "".to_string(),
+                                "".to_string(),
+                                "".to_string(),
+                            ]);
+                        }
+                    }
+                }
+
+                println!("{table}");
+                return Ok(());
+            }
+
+            Command::Delete { session_id, force } => {
+                delete_session(session_id, *force)?;
+                println!("Session deleted: {session_id}");
+                return Ok(());
+            }
+
+            Command::Execute { session_id } => {
+                let mut opened = open_session(session_id)?;
+                let mut ui = StdioExecuteUi;
+                let journal = execute_prepared_session(&mut opened.session, &mut ui)?;
+                if journal.final_status == Some(JournalFinalStatus::Executed) {
+                    println!("executed {}", journal.journal_id);
+                    return Ok(());
+                }
+                let error = journal
+                    .steps
+                    .iter()
+                    .find_map(|step| step.error.as_deref())
+                    .unwrap_or("unknown failure");
+                bail!("execution interrupted: {error}");
+            }
+            Command::Undo { session_id } => {
+                let mut opened = open_session(session_id)?;
+                let mut ui = StdioExecuteUi;
+                let journal = undo_session(&mut opened.session, &mut ui)?;
+                if journal.final_status == Some(JournalFinalStatus::Undone) {
+                    println!("undone {}", journal.journal_id);
+                    return Ok(());
+                }
+                bail!("undo interrupted {}", journal.journal_id);
             }
         }
-        return Ok(());
-    }
-
-    if let Some(Command::Undo { session_id }) = &cli.command {
-        let mut opened = open_session(session_id)?;
-        let mut ui = StdioExecuteUi;
-        let journal = undo_session(&mut opened.session, &mut ui)?;
-        if journal.final_status == Some(JournalFinalStatus::Undone) {
-            println!("undone {}", journal.journal_id);
-            return Ok(());
-        }
-        bail!("undo interrupted {}", journal.journal_id);
     }
 
     let is_tty = stdin().is_terminal() && stdout().is_terminal();
@@ -76,11 +127,23 @@ fn run() -> Result<()> {
     } else {
         let root = requested_root.unwrap_or(std::env::current_dir()?.canonicalize()?);
         let root_text = path_text(&root)?;
-        let unfinished = if cli.new_session {
+        let mut unfinished = if cli.new_session {
             Vec::new()
         } else {
             list_unfinished(Some(&root_text))?
         };
+        // The TUI can only execute, so a session stuck mid-undo would dead-end there.
+        // Name it and start fresh instead; `--session <id>` still reaches it.
+        unfinished.retain(|session| {
+            if session.status.executable() {
+                return true;
+            }
+            eprintln!(
+                "skipping {} ({}); use --session {} to inspect it",
+                session.id, session.status, session.id
+            );
+            false
+        });
         if let Some(first) = unfinished.first() {
             for other in unfinished.iter().skip(1) {
                 eprintln!(
@@ -161,10 +224,6 @@ fn canonical_root(directory: Option<&Path>) -> Result<Option<PathBuf>> {
     directory
         .map(|path| fs::canonicalize(path).with_context(|| format!("resolve {}", path.display())))
         .transpose()
-}
-
-fn path_text(path: &Path) -> Result<String> {
-    Ok(path.to_str().context("path is not valid UTF-8")?.to_owned())
 }
 
 fn require_supported_platform() -> Result<()> {

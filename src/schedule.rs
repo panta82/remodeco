@@ -2,6 +2,7 @@ use crate::model::{
     DestParentRef, ManifestEntry, OpKind, Operation, PlannedKind, PlannedStep, SessionMode,
 };
 use crate::scan::directory_identity;
+use crate::util::path_text;
 use anyhow::{Context, Result, bail};
 use rand::RngCore;
 use std::collections::{HashMap, HashSet};
@@ -358,10 +359,6 @@ fn resolve_existing_parent(parent: &Path) -> Result<(PathBuf, Vec<String>)> {
             Err(error) => return Err(error).with_context(|| format!("stat {}", current.display())),
         }
     }
-}
-
-fn path_text(path: &Path) -> Result<String> {
-    Ok(path.to_str().context("path is not valid UTF-8")?.to_owned())
 }
 
 pub fn format_schedule(schedule: &ScheduleResult) -> String {

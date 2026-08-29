@@ -4,7 +4,7 @@ use crate::model::{
 };
 use crate::native::{copy_no_replace, rename_no_replace, symlink_no_replace};
 use crate::scan::{directory_identity, fingerprint_from_metadata, lstat_fingerprint};
-use crate::session::write_journal;
+use crate::store::write_journal;
 use crate::trash::{locate_trash, perform_trash, unique_trash_key};
 use anyhow::{Context, Result, bail};
 use std::fs;
@@ -213,33 +213,32 @@ pub fn run_journal(
             }
         }
         let mut permanent_delete = false;
-        if journal.steps[index].planned.op == PlannedKind::Trash {
-            if let Some(from) = journal.steps[index].planned.from.clone() {
-                if let Err(error) = locate_trash(Path::new(&from)) {
-                    let reason = format!("{error:#}");
-                    let action = if delete_all_untrashable {
-                        TrashFallbackAction::Delete
-                    } else {
-                        ui.resolve_unsafe_trash(&from, &reason)?
-                    };
-                    match action {
-                        TrashFallbackAction::Delete | TrashFallbackAction::All => {
-                            delete_all_untrashable =
-                                delete_all_untrashable || action == TrashFallbackAction::All;
-                            permanent_delete = true;
-                        }
-                        TrashFallbackAction::Skip => {
-                            skip_step(journal, index);
-                            write_journal(session_id, journal)?;
-                            continue;
-                        }
-                        TrashFallbackAction::Abort => {
-                            journal.steps[index].error = Some("aborted".into());
-                            journal.final_status = None;
-                            write_journal(session_id, journal)?;
-                            return Ok(());
-                        }
-                    }
+        if journal.steps[index].planned.op == PlannedKind::Trash
+            && let Some(from) = journal.steps[index].planned.from.clone()
+            && let Err(error) = locate_trash(Path::new(&from))
+        {
+            let reason = format!("{error:#}");
+            let action = if delete_all_untrashable {
+                TrashFallbackAction::Delete
+            } else {
+                ui.resolve_unsafe_trash(&from, &reason)?
+            };
+            match action {
+                TrashFallbackAction::Delete | TrashFallbackAction::All => {
+                    delete_all_untrashable =
+                        delete_all_untrashable || action == TrashFallbackAction::All;
+                    permanent_delete = true;
+                }
+                TrashFallbackAction::Skip => {
+                    skip_step(journal, index);
+                    write_journal(session_id, journal)?;
+                    continue;
+                }
+                TrashFallbackAction::Abort => {
+                    journal.steps[index].error = Some("aborted".into());
+                    journal.final_status = None;
+                    write_journal(session_id, journal)?;
+                    return Ok(());
                 }
             }
         }

@@ -25,6 +25,9 @@ pub enum PlanFormat {
 }
 
 impl PlanFormat {
+    /// Every format, in `--format` order.
+    pub const ALL: &'static [Self] = &[Self::Properties, Self::Yaml, Self::PlainText];
+
     pub fn file_name(self) -> &'static str {
         match self {
             Self::Properties => "plan.properties",

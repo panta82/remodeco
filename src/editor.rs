@@ -49,27 +49,28 @@ pub fn resolve_editor(config: &AppConfig) -> Result<Option<ResolvedEditor>> {
         }
         None => Vec::new(),
     };
-    if argv.is_empty() {
-        if let Ok(command) = env::var("VISUAL") {
-            argv = shell_words::split(&command).context("invalid VISUAL")?;
-        }
+    if argv.is_empty()
+        && let Ok(command) = env::var("VISUAL")
+    {
+        argv = shell_words::split(&command).context("invalid VISUAL")?;
     }
-    if argv.is_empty() {
-        if let Ok(command) = env::var("EDITOR") {
-            argv = shell_words::split(&command).context("invalid EDITOR")?;
-        }
+    if argv.is_empty()
+        && let Ok(command) = env::var("EDITOR")
+    {
+        argv = shell_words::split(&command).context("invalid EDITOR")?;
     }
     let gui_allowed = config.editor_mode == EditorMode::Gui
         || (!is_headless_remote() && config.editor_mode != EditorMode::Tty);
-    if argv.is_empty() && gui_allowed {
-        if let Some(editor) = GUI_EDITORS.iter().find(|editor| which(editor).is_some()) {
-            argv.push((*editor).to_owned());
-        }
+    if argv.is_empty()
+        && gui_allowed
+        && let Some(editor) = GUI_EDITORS.iter().find(|editor| which(editor).is_some())
+    {
+        argv.push((*editor).to_owned());
     }
-    if argv.is_empty() {
-        if let Some(editor) = ["vi", "nano"].iter().find(|editor| which(editor).is_some()) {
-            argv.push((*editor).to_owned());
-        }
+    if argv.is_empty()
+        && let Some(editor) = ["vi", "nano"].iter().find(|editor| which(editor).is_some())
+    {
+        argv.push((*editor).to_owned());
     }
     if argv.is_empty() {
         return Ok(None);

@@ -1,3 +1,4 @@
+use rand::RngCore;
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -29,6 +30,15 @@ pub enum SessionStatus {
 }
 
 impl SessionStatus {
+    /// Statuses `execute_session` accepts. Auto-resume uses this so the TUI is never
+    /// opened on a session it cannot act on.
+    pub fn executable(self) -> bool {
+        matches!(
+            self,
+            Self::Draft | Self::Executing | Self::ExecuteInterrupted
+        )
+    }
+
     pub fn unfinished(self) -> bool {
         matches!(
             self,
@@ -260,6 +270,46 @@ pub struct Journal {
     pub expected_revision: u64,
     pub expected_mode: SessionMode,
     pub steps: Vec<JournalStep>,
+}
+
+impl Journal {
+    pub fn new(
+        steps: Vec<PlannedStep>,
+        mode: JournalMode,
+        parent: Option<String>,
+        expected_plan_hash: String,
+        expected_revision: u64,
+        expected_mode: SessionMode,
+    ) -> Self {
+        let mut random = [0_u8; 8];
+        rand::thread_rng().fill_bytes(&mut random);
+        Self {
+            journal_id: hex::encode(random),
+            mode,
+            parent_journal_id: parent,
+            final_status: None,
+            superseded_by_journal_id: None,
+            expected_plan_hash,
+            expected_revision,
+            expected_mode,
+            steps: steps.into_iter().map(JournalStep::pending).collect(),
+        }
+    }
+}
+
+impl JournalStep {
+    /// A step that has not been attempted yet.
+    pub fn pending(planned: PlannedStep) -> Self {
+        Self {
+            planned,
+            state: StepState::Pending,
+            error: None,
+            created_by_us: None,
+            created_dir_fingerprint: None,
+            fingerprint_to: None,
+            trash_restore_key: None,
+        }
+    }
 }
 
 #[cfg(test)]

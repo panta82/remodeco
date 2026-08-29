@@ -63,9 +63,11 @@ resume; edits are kept.
 
 ```sh
 remodeco . --dry-run
-remodeco --list-sessions
+remodeco list
 remodeco --session SESSION_ID
+remodeco execute SESSION_ID
 remodeco undo SESSION_ID
+remodeco delete SESSION_ID
 ```
 
 Run `remodeco --help` for scanning, editor, copy, and session options.

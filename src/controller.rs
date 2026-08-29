@@ -1,23 +1,25 @@
 use crate::config::{AppConfig, PlanFormat};
 use crate::execute::{ExecuteUi, run_journal};
+use crate::lock::HeldLock;
 use crate::model::{
     Journal, JournalFinalStatus, JournalMode, ManifestEntry, ManifestFile, OpKind, Operation,
     PlannedKind, PlannedStep, SessionMode, SessionRecord, SessionStats, SessionStatus,
 };
 use crate::plan::{
-    body_hash, classify_ops, generate_plan, id_width_for_count, is_legacy_plan_text, parse_plan,
-    render_plan, validate_plan_header, whole_file_hash,
+    body_hash, classify_ops, generate_plan, id_width_for_count, parse_plan, render_plan,
+    validate_plan_header, whole_file_hash,
 };
 use crate::scan::scan_tree;
 use crate::schedule::{ScheduleResult, capture_destination_parent, schedule};
-use crate::session::{
-    HeldLock, active_executed_journal, execute_lock_path, make_session_id, new_journal, now,
-    plan_file_name, read_journal, read_manifest, read_session, replace_plan, require_lock,
-    session_dir, write_journal, write_manifest, write_plan, write_session,
+use crate::store::{
+    delete_session_dir, list_journals, make_session_id, read_journal, read_manifest, read_session,
+    replace_plan, require_execute_lock, require_session_lock, session_dir, write_journal,
+    write_manifest, write_plan, write_session,
 };
+use crate::util::{now, path_text};
 use anyhow::{Context, Result, bail};
 use rand::RngCore;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -68,7 +70,7 @@ pub fn create_session(
         .collect();
     let id_width = id_width_for_count(entries.len());
     let plan = generate_plan(&id, &scan.root, &entries, id_width);
-    let plan_path = write_plan(&id, &plan, plan_file_name(config.plan_format))?;
+    let plan_path = write_plan(&id, &plan, config.plan_format.file_name())?;
     let manifest_path = session_dir(&id)?.join("manifest.json");
     write_manifest(
         &id,
@@ -110,20 +112,17 @@ pub fn create_session(
         },
     };
     write_session(&mut session)?;
-    let lock = require_lock(
-        &session_dir(&id)?.join("session.lock"),
-        &format!("session locked: {id}"),
-    )?;
+    let lock = require_session_lock(&id)?;
     Ok(OpenedSession { session, lock })
 }
 
 pub fn open_session(id: &str) -> Result<OpenedSession> {
-    crate::session::validate_session_id(id)?;
+    // Check first: taking the lock would create the directory we are about to report on.
+    if !session_dir(id)?.exists() {
+        bail!("no such session: {id}");
+    }
+    let lock = require_session_lock(id)?;
     let session = read_session(id)?;
-    let lock = require_lock(
-        &session_dir(id)?.join("session.lock"),
-        &format!("session locked: {id}"),
-    )?;
     Ok(OpenedSession { session, lock })
 }
 
@@ -170,12 +169,12 @@ pub fn reset_session_plan(session: &mut SessionRecord, format: PlanFormat) -> Re
     Ok(())
 }
 
-/// Move a draft session onto the preferred plan filename and rewrite legacy syntax.
+/// Move a draft session onto the preferred plan filename, preserving edited destinations.
 pub fn normalize_session_plan(session: &mut SessionRecord, format: PlanFormat) -> Result<bool> {
     if session.status != SessionStatus::Draft {
         return Ok(false);
     }
-    let preferred = plan_file_name(format);
+    let preferred = format.file_name();
     let current_name = Path::new(&session.plan_path)
         .file_name()
         .and_then(|name| name.to_str())
@@ -188,7 +187,7 @@ pub fn normalize_session_plan(session: &mut SessionRecord, format: PlanFormat) -
         Ok(parsed) => parsed,
         Err(_) => return Ok(false),
     };
-    if parsed.unknown_lines.is_empty() && current_name == preferred && !is_legacy_plan_text(&raw) {
+    if parsed.unknown_lines.is_empty() && current_name == preferred {
         return Ok(false);
     }
     if parsed.unknown_lines.is_empty() {
@@ -216,7 +215,7 @@ pub fn normalize_session_plan(session: &mut SessionRecord, format: PlanFormat) -
 }
 
 fn apply_plan(session: &mut SessionRecord, plan: &str, format: PlanFormat) -> Result<()> {
-    let plan_path = replace_plan(&session.id, plan, plan_file_name(format))?;
+    let plan_path = replace_plan(&session.id, plan, format.file_name())?;
     session.plan_path = path_text(&plan_path)?;
     session.whole_file_hash = whole_file_hash(plan);
     session.body_hash = body_hash(plan);
@@ -284,16 +283,16 @@ pub fn execute_session(
     ui: &mut dyn ExecuteUi,
 ) -> Result<Journal> {
     refresh_hashes(session)?;
+    if !session.status.executable() {
+        bail!("cannot execute a session with status {}", session.status);
+    }
     if session.revision != expected.revision
         || session.mode != expected.mode
         || session.whole_file_hash != expected.plan_hash
     {
         bail!("session changed since confirmation; reload");
     }
-    let _execution_lock = require_lock(
-        &execute_lock_path()?,
-        "execute.lock held by another remodeco",
-    )?;
+    let _execution_lock = require_execute_lock()?;
 
     let mut journal = if matches!(
         session.status,
@@ -324,7 +323,7 @@ pub fn execute_session(
         if !scheduled.errors.is_empty() {
             bail!(scheduled.errors.join("\n"));
         }
-        new_journal(
+        Journal::new(
             scheduled.steps,
             JournalMode::Execute,
             None,
@@ -355,7 +354,57 @@ pub fn execute_session(
     Ok(journal)
 }
 
+pub fn execute_prepared_session(
+    session: &mut SessionRecord,
+    ui: &mut dyn ExecuteUi,
+) -> Result<Journal> {
+    refresh_hashes(session)?;
+    let snapshot = expected(session);
+    execute_session(session, &snapshot, ui)
+}
+
+/// The journal `undo` should reverse: the session's active one if it still needs
+/// undoing, else any other execute journal that ran and has not been undone.
+///
+/// `active_journal_id` tracks the last journal we touched, which after an undo is the
+/// undo journal itself, so both branches must check the mode. Journals carry no
+/// timestamp, so when several qualify the choice among them is arbitrary.
+fn active_executed_journal(session: &SessionRecord) -> Result<Journal> {
+    let journals = list_journals(&session.id)?;
+    let undone: HashSet<&str> = journals
+        .iter()
+        .filter(|journal| {
+            journal.mode == JournalMode::Undo
+                && journal.final_status == Some(JournalFinalStatus::Undone)
+        })
+        .filter_map(|journal| journal.parent_journal_id.as_deref())
+        .collect();
+    let undoable = |journal: &Journal| {
+        journal.mode == JournalMode::Execute
+            && journal.final_status == Some(JournalFinalStatus::Executed)
+            && !undone.contains(journal.journal_id.as_str())
+    };
+    session
+        .active_journal_id
+        .as_deref()
+        .and_then(|id| journals.iter().find(|journal| journal.journal_id == id))
+        .filter(|journal| undoable(journal))
+        .or_else(|| journals.iter().find(|journal| undoable(journal)))
+        .cloned()
+        .context("no executed journal to undo")
+}
+
 pub fn undo_session(session: &mut SessionRecord, ui: &mut dyn ExecuteUi) -> Result<Journal> {
+    if matches!(
+        session.status,
+        SessionStatus::Undoing | SessionStatus::UndoInterrupted
+    ) {
+        bail!(
+            "session {} has an interrupted undo (status {}); resuming an undo is not supported",
+            session.id,
+            session.status
+        );
+    }
     let active = active_executed_journal(session)?;
     let mut inverse = Vec::new();
     let mut mkdirs = HashMap::<PathBuf, String>::new();
@@ -417,11 +466,8 @@ pub fn undo_session(session: &mut SessionRecord, ui: &mut dyn ExecuteUi) -> Resu
             PlannedKind::Mkdir | PlannedKind::Noop => {}
         }
     }
-    let _execution_lock = require_lock(
-        &execute_lock_path()?,
-        "execute.lock held by another remodeco",
-    )?;
-    let mut journal = new_journal(
+    let _execution_lock = require_execute_lock()?;
+    let mut journal = Journal::new(
         inverse,
         JournalMode::Undo,
         Some(active.journal_id),
@@ -436,19 +482,18 @@ pub fn undo_session(session: &mut SessionRecord, ui: &mut dyn ExecuteUi) -> Resu
     run_journal(&session.id, &mut journal, &session.root, ui)?;
     session.status = if journal.final_status == Some(JournalFinalStatus::Undone) {
         for step in &active.steps {
-            if step.planned.op == PlannedKind::Trash {
-                if let Some(info_path) = step
+            if step.planned.op == PlannedKind::Trash
+                && let Some(info_path) = step
                     .trash_restore_key
                     .as_ref()
                     .and_then(|key| key.info_path.as_deref())
-                {
-                    match fs::remove_file(info_path) {
-                        Ok(()) => {}
-                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                        Err(error) => {
-                            return Err(error)
-                                .with_context(|| format!("remove trash metadata {info_path}"));
-                        }
+            {
+                match fs::remove_file(info_path) {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => {
+                        return Err(error)
+                            .with_context(|| format!("remove trash metadata {info_path}"));
                     }
                 }
             }
@@ -483,8 +528,21 @@ fn inverse_step(
     }
 }
 
-fn path_text(path: &Path) -> Result<String> {
-    Ok(path.to_str().context("path is not UTF-8")?.to_owned())
+/// Removes a session and everything under it. This includes `journals/`, so deleting an
+/// executed session gives up the ability to undo it; `force` is required in that case.
+pub fn delete_session(id: &str, force: bool) -> Result<()> {
+    // Check first: taking the lock would create the directory we are about to report on.
+    if !session_dir(id)?.exists() {
+        bail!("no such session: {id}");
+    }
+    let _session_lock = require_session_lock(id)?;
+    if !force && active_executed_journal(&read_session(id)?).is_ok() {
+        bail!("session {id} can still be undone; run `remodeco undo {id}` first, or pass --force");
+    }
+    if !delete_session_dir(id)? {
+        bail!("no such session: {id}");
+    }
+    Ok(())
 }
 
 pub fn operation_counts(operations: &[Operation]) -> (usize, usize) {
@@ -594,6 +652,92 @@ mod tests {
         assert_eq!(undo.final_status, Some(JournalFinalStatus::Undone));
         assert_eq!(fs::read_to_string(&a).unwrap(), "A");
         assert_eq!(fs::read_to_string(&b).unwrap(), "B");
+
+        // Undoing again must not invert the undo journal and re-apply the swap.
+        let error = undo_session(&mut opened.session, &mut ui).unwrap_err();
+        assert_eq!(error.to_string(), "no executed journal to undo");
+        assert_eq!(fs::read_to_string(&a).unwrap(), "A");
+        assert_eq!(fs::read_to_string(&b).unwrap(), "B");
+    }
+
+    #[test]
+    fn delete_rejects_unknown_ids_without_creating_them() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let _restore = isolated_environment(&temp);
+
+        let error = delete_session("no-such-session", false).unwrap_err();
+        assert_eq!(error.to_string(), "no such session: no-such-session");
+        assert!(!session_dir("no-such-session").unwrap().exists());
+    }
+
+    #[test]
+    fn delete_keeps_an_undoable_session_unless_forced() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let _restore = isolated_environment(&temp);
+        let root = temp.path().join("files");
+        fs::create_dir(&root).unwrap();
+        let source = root.join("a.txt");
+        let destination = root.join("b.txt");
+        fs::write(&source, "A").unwrap();
+
+        let mut opened = create_session(&root, SessionMode::Move, &config(), true).unwrap();
+        let raw = fs::read_to_string(&opened.session.plan_path).unwrap();
+        fs::write(
+            &opened.session.plan_path,
+            raw.replace(
+                &format!("\t:\t{}\n", path_text(&source).unwrap()),
+                &format!("\t:\t{}\n", path_text(&destination).unwrap()),
+            ),
+        )
+        .unwrap();
+
+        let mut ui = crate::execute::QuietExecuteUi;
+        execute_prepared_session(&mut opened.session, &mut ui).unwrap();
+        let id = opened.session.id.clone();
+        drop(opened);
+
+        let error = delete_session(&id, false).unwrap_err();
+        assert!(
+            error.to_string().contains("can still be undone"),
+            "unexpected error: {error}"
+        );
+        assert!(session_dir(&id).unwrap().exists());
+
+        delete_session(&id, true).unwrap();
+        assert!(!session_dir(&id).unwrap().exists());
+    }
+
+    #[test]
+    fn executes_a_prepared_session_and_rejects_replay() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let _restore = isolated_environment(&temp);
+        let root = temp.path().join("files");
+        fs::create_dir(&root).unwrap();
+        let source = root.join("a.txt");
+        let destination = root.join("b.txt");
+        fs::write(&source, "A").unwrap();
+
+        let mut opened = create_session(&root, SessionMode::Move, &config(), true).unwrap();
+        let raw = fs::read_to_string(&opened.session.plan_path).unwrap();
+        let edited = raw.replace(
+            &format!("\t:\t{}\n", path_text(&source).unwrap()),
+            &format!("\t:\t{}\n", path_text(&destination).unwrap()),
+        );
+        fs::write(&opened.session.plan_path, edited).unwrap();
+
+        let mut ui = crate::execute::QuietExecuteUi;
+        let journal = execute_prepared_session(&mut opened.session, &mut ui).unwrap();
+        assert_eq!(journal.final_status, Some(JournalFinalStatus::Executed));
+        assert_eq!(fs::read_to_string(&destination).unwrap(), "A");
+
+        let error = execute_prepared_session(&mut opened.session, &mut ui).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "cannot execute a session with status executed"
+        );
     }
 
     #[test]
@@ -730,73 +874,6 @@ mod tests {
         plain.plan_format = PlanFormat::PlainText;
         let txt = create_session(&root, SessionMode::Move, &plain, true).unwrap();
         assert!(txt.session.plan_path.ends_with("plan.txt"));
-    }
-
-    #[test]
-    fn migrates_legacy_markdown_plan_to_properties_preserving_destinations() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        let temp = tempfile::tempdir().unwrap();
-        let _restore = isolated_environment(&temp);
-        let root = temp.path().join("files");
-        fs::create_dir(&root).unwrap();
-        let source = root.join("a.txt");
-        fs::write(&source, "A").unwrap();
-        let dest_text = path_text(&root.join("b.txt")).unwrap();
-
-        let mut opened = create_session(&root, SessionMode::Move, &config(), true).unwrap();
-        let md = format!(
-            "---\nremodeco: 1\nid: {}\nroot: {}\n---\n\n\
-             > Edit the path after `{{id}}` (the tab) to **rename/move**.\n\
-             - `{{1}}`\t{dest_text}\n",
-            opened.session.id,
-            crate::plan::yaml_single_quote(&opened.session.root),
-        );
-        let md_path = Path::new(&opened.session.plan_path).with_file_name("plan.md");
-        fs::write(&md_path, md).unwrap();
-        fs::remove_file(&opened.session.plan_path).unwrap();
-        opened.session.plan_path = path_text(&md_path).unwrap();
-        crate::session::write_session(&mut opened.session).unwrap();
-
-        assert!(normalize_session_plan(&mut opened.session, PlanFormat::Properties).unwrap());
-        assert!(opened.session.plan_path.ends_with("plan.properties"));
-        assert!(!md_path.exists());
-        let raw = fs::read_to_string(&opened.session.plan_path).unwrap();
-        assert!(raw.contains(&format!("F1\t:\t{dest_text}")));
-        assert!(!raw.contains("- `{"));
-        let operations = parse_session_plan(&opened.session).unwrap();
-        assert_eq!(operations[0].kind, OpKind::Move);
-        assert_eq!(operations[0].to, dest_text);
-    }
-
-    #[test]
-    fn reset_relocates_legacy_plan_md_to_txt() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        let temp = tempfile::tempdir().unwrap();
-        let _restore = isolated_environment(&temp);
-        let root = temp.path().join("files");
-        fs::create_dir(&root).unwrap();
-        fs::write(root.join("a.txt"), "A").unwrap();
-
-        let mut opened = create_session(&root, SessionMode::Move, &config(), true).unwrap();
-        let md_path = Path::new(&opened.session.plan_path).with_file_name("plan.md");
-        fs::rename(&opened.session.plan_path, &md_path).unwrap();
-        opened.session.plan_path = path_text(&md_path).unwrap();
-        crate::session::write_session(&mut opened.session).unwrap();
-
-        reset_session_plan(&mut opened.session, PlanFormat::PlainText).unwrap();
-        assert!(opened.session.plan_path.ends_with("plan.txt"));
-        assert!(!md_path.exists());
-        assert!(
-            !Path::new(&opened.session.plan_path)
-                .with_file_name("plan.properties")
-                .exists()
-        );
-        assert!(
-            parse_session_plan(&opened.session)
-                .unwrap()
-                .iter()
-                .all(|operation| operation.kind == OpKind::Noop)
-        );
     }
 
     fn plan_two_renames(root: &Path) -> (OpenedSession, PathBuf, PathBuf, PathBuf, PathBuf) {

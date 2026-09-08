@@ -522,6 +522,13 @@ mod tests {
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
+    fn canonical_tempdir() -> tempfile::TempDir {
+        // Plans contain canonical paths. macOS temporary paths can start with
+        // /var, a symlink to /private/var, so normalize before constructing fixtures.
+        let base = std::env::temp_dir().canonicalize().unwrap();
+        tempfile::tempdir_in(base).unwrap()
+    }
+
     struct EnvRestore {
         data: Option<std::ffi::OsString>,
         config: Option<std::ffi::OsString>,
@@ -576,7 +583,7 @@ mod tests {
     #[test]
     fn executes_and_undoes_a_rename_cycle() {
         let _guard = ENV_LOCK.lock().unwrap();
-        let temp = tempfile::tempdir().unwrap();
+        let temp = canonical_tempdir();
         let _restore = isolated_environment(&temp);
         let root = temp.path().join("files");
         fs::create_dir(&root).unwrap();
@@ -619,7 +626,7 @@ mod tests {
     #[test]
     fn delete_rejects_unknown_ids_without_creating_them() {
         let _guard = ENV_LOCK.lock().unwrap();
-        let temp = tempfile::tempdir().unwrap();
+        let temp = canonical_tempdir();
         let _restore = isolated_environment(&temp);
 
         let id = SessionId::new("no-such-session").unwrap();
@@ -631,7 +638,7 @@ mod tests {
     #[test]
     fn delete_keeps_an_undoable_session_unless_forced() {
         let _guard = ENV_LOCK.lock().unwrap();
-        let temp = tempfile::tempdir().unwrap();
+        let temp = canonical_tempdir();
         let _restore = isolated_environment(&temp);
         let root = temp.path().join("files");
         fs::create_dir(&root).unwrap();
@@ -669,7 +676,7 @@ mod tests {
     #[test]
     fn executes_a_prepared_session_and_rejects_replay() {
         let _guard = ENV_LOCK.lock().unwrap();
-        let temp = tempfile::tempdir().unwrap();
+        let temp = canonical_tempdir();
         let _restore = isolated_environment(&temp);
         let root = temp.path().join("files");
         fs::create_dir(&root).unwrap();
@@ -700,7 +707,7 @@ mod tests {
     #[test]
     fn trashes_and_restores_with_metadata_cleanup() {
         let _guard = ENV_LOCK.lock().unwrap();
-        let temp = tempfile::tempdir().unwrap();
+        let temp = canonical_tempdir();
         let _restore = isolated_environment(&temp);
         let root = temp.path().join("files");
         fs::create_dir(&root).unwrap();
@@ -740,7 +747,7 @@ mod tests {
     #[test]
     fn refuses_a_plan_changed_after_confirmation() {
         let _guard = ENV_LOCK.lock().unwrap();
-        let temp = tempfile::tempdir().unwrap();
+        let temp = canonical_tempdir();
         let _restore = isolated_environment(&temp);
         let root = temp.path().join("files");
         fs::create_dir(&root).unwrap();
@@ -767,7 +774,7 @@ mod tests {
     #[test]
     fn reset_restores_original_plan_destinations() {
         let _guard = ENV_LOCK.lock().unwrap();
-        let temp = tempfile::tempdir().unwrap();
+        let temp = canonical_tempdir();
         let _restore = isolated_environment(&temp);
         let root = temp.path().join("files");
         fs::create_dir(&root).unwrap();
@@ -813,7 +820,7 @@ mod tests {
     #[test]
     fn writes_plan_properties_by_default_and_honors_format() {
         let _guard = ENV_LOCK.lock().unwrap();
-        let temp = tempfile::tempdir().unwrap();
+        let temp = canonical_tempdir();
         let _restore = isolated_environment(&temp);
         let root = temp.path().join("files");
         fs::create_dir(&root).unwrap();
@@ -864,7 +871,7 @@ mod tests {
     #[test]
     fn skip_leaves_changed_file_and_continues() {
         let _guard = ENV_LOCK.lock().unwrap();
-        let temp = tempfile::tempdir().unwrap();
+        let temp = canonical_tempdir();
         let _restore = isolated_environment(&temp);
         let root = temp.path().join("files");
         let (mut opened, a, b, a_to, b_to) = plan_two_renames(&root);
@@ -893,7 +900,7 @@ mod tests {
     #[test]
     fn abort_stops_before_the_changed_file() {
         let _guard = ENV_LOCK.lock().unwrap();
-        let temp = tempfile::tempdir().unwrap();
+        let temp = canonical_tempdir();
         let _restore = isolated_environment(&temp);
         let root = temp.path().join("files");
         let (mut opened, a, b, a_to, b_to) = plan_two_renames(&root);
@@ -922,7 +929,7 @@ mod tests {
     #[test]
     fn proceed_renames_the_changed_file() {
         let _guard = ENV_LOCK.lock().unwrap();
-        let temp = tempfile::tempdir().unwrap();
+        let temp = canonical_tempdir();
         let _restore = isolated_environment(&temp);
         let root = temp.path().join("files");
         let (mut opened, a, b, a_to, b_to) = plan_two_renames(&root);
@@ -945,7 +952,7 @@ mod tests {
     #[test]
     fn all_proceeds_remaining_changed_files() {
         let _guard = ENV_LOCK.lock().unwrap();
-        let temp = tempfile::tempdir().unwrap();
+        let temp = canonical_tempdir();
         let _restore = isolated_environment(&temp);
         let root = temp.path().join("files");
         let (mut opened, a, b, a_to, b_to) = plan_two_renames(&root);
@@ -969,7 +976,7 @@ mod tests {
     #[test]
     fn skip_leaves_missing_file_and_continues() {
         let _guard = ENV_LOCK.lock().unwrap();
-        let temp = tempfile::tempdir().unwrap();
+        let temp = canonical_tempdir();
         let _restore = isolated_environment(&temp);
         let root = temp.path().join("files");
         let (mut opened, a, b, a_to, b_to) = plan_two_renames(&root);
@@ -992,7 +999,7 @@ mod tests {
     #[test]
     fn all_skips_remaining_missing_files() {
         let _guard = ENV_LOCK.lock().unwrap();
-        let temp = tempfile::tempdir().unwrap();
+        let temp = canonical_tempdir();
         let _restore = isolated_environment(&temp);
         let root = temp.path().join("files");
         let (mut opened, a, b, a_to, b_to) = plan_two_renames(&root);
@@ -1054,7 +1061,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     fn unsafe_trash_can_permanently_delete() {
         let _guard = ENV_LOCK.lock().unwrap();
-        let temp = tempfile::tempdir().unwrap();
+        let temp = canonical_tempdir();
         let _restore = isolated_environment(&temp);
         poison_home_trash(&temp);
         let root = temp.path().join("files");
@@ -1083,7 +1090,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     fn unsafe_trash_skip_keeps_the_file() {
         let _guard = ENV_LOCK.lock().unwrap();
-        let temp = tempfile::tempdir().unwrap();
+        let temp = canonical_tempdir();
         let _restore = isolated_environment(&temp);
         poison_home_trash(&temp);
         let root = temp.path().join("files");
@@ -1111,7 +1118,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     fn unsafe_trash_all_deletes_remaining() {
         let _guard = ENV_LOCK.lock().unwrap();
-        let temp = tempfile::tempdir().unwrap();
+        let temp = canonical_tempdir();
         let _restore = isolated_environment(&temp);
         poison_home_trash(&temp);
         let root = temp.path().join("files");
@@ -1140,7 +1147,7 @@ mod tests {
     #[test]
     fn moving_all_files_removes_empty_source_dir() {
         let _guard = ENV_LOCK.lock().unwrap();
-        let temp = tempfile::tempdir().unwrap();
+        let temp = canonical_tempdir();
         let _restore = isolated_environment(&temp);
         let root = temp.path().join("files");
         fs::create_dir(&root).unwrap();
@@ -1192,7 +1199,7 @@ mod tests {
     #[test]
     fn copy_does_not_remove_source_dir() {
         let _guard = ENV_LOCK.lock().unwrap();
-        let temp = tempfile::tempdir().unwrap();
+        let temp = canonical_tempdir();
         let _restore = isolated_environment(&temp);
         let root = temp.path().join("files");
         fs::create_dir(&root).unwrap();

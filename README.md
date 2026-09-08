@@ -23,13 +23,11 @@ F03	:	/home/joesmith/Pictures/sis.jpg
 
 4️⃣ Save and exit (if editor is TUI), or tab switch back into remodeco (if editor is GUI).
 
-5️⃣ Review the changeses
+5️⃣ Review the changes
 
 ![docs_diff.png](misc/docs_diff.png)
 
-6️⃣ Review in the fullscreen preview: `e` execute, `o` re-open the editor, `r` reset, `c`/`q` cancel. `/` search, `n`/`N` next/previous match, `f` filter. `j`/`k` or arrows scroll, `g`/`G` or Home/End jump, `Ctrl-d`/`u` half-page, `?` lists keys. Filter and search only change what you see — execute still applies the whole plan.
-
-If you accept the changes, your files will be renamed, copied, or moved to trash.
+6️⃣ If satisfied with the plan, press <kbd>e</kbd> to execute. Otherwise, you can exit and come back later, or start fresh (<kbd>r</kbd>).
 
 ### Plan file format
 
@@ -55,6 +53,16 @@ The first three lines start with `#>` and record the format version, session ID,
 and root path.
 Keep them intact; they bind the plan to its session.
 
+### Builds and releases
+
+Builds are available under [Releases](https://github.com/panta82/remodeco/releases).
+
+| System              | Architectures        | Packages                          |
+|---------------------|----------------------|-----------------------------------|
+| Linux               | x86-64, ARM64        | `.deb`, `.rpm`, `.tar.gz`         |
+| macOS               | Intel, Apple Silicon | `.pkg`, `.tar.gz`                 |
+| Windows through WSL | x86-64, ARM64        | Use the Linux packages inside WSL |
+
 ### Configuration
 
 - Per-directory configuration: `{dir}/.remodeco.json`
@@ -72,6 +80,13 @@ remodeco delete SESSION_ID
 ```
 
 Run `remodeco --help` for scanning, editor, copy, and session options.
+
+### Version history
+
+**1.0.0** -
+*2026-09-08*:
+
+Project revived, rewritten in Rust, and released with a new plan format.
 
 ### License
 

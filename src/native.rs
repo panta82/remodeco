@@ -11,7 +11,9 @@ pub fn rename_no_replace(from: &Path, to: &Path) -> Result<()> {
     let to_c = CString::new(to.as_os_str().as_bytes()).context("destination contains NUL")?;
     #[cfg(target_os = "linux")]
     let result = unsafe {
-        libc::renameat2(
+        // musl does not export renameat2; invoke the same kernel operation directly.
+        libc::syscall(
+            libc::SYS_renameat2,
             libc::AT_FDCWD,
             from_c.as_ptr(),
             libc::AT_FDCWD,

@@ -1,13 +1,18 @@
 use crate::model::TrashKey;
 use crate::native::rename_no_replace;
 use crate::util::path_text;
-use anyhow::{Context, Result, bail};
+#[cfg(target_os = "linux")]
+use anyhow::bail;
+use anyhow::{Context, Result};
 use chrono::Local;
+#[cfg(not(all(test, target_os = "macos")))]
 use directories::BaseDirs;
 use percent_encoding::{AsciiSet, CONTROLS, utf8_percent_encode};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
-use std::os::unix::fs::{MetadataExt, PermissionsExt};
+use std::os::unix::fs::MetadataExt;
+#[cfg(target_os = "linux")]
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 const PATH_ENCODE: &AsciiSet = &CONTROLS
@@ -55,15 +60,21 @@ pub struct TrashLocation {
 }
 
 pub fn locate_trash(source: &Path) -> Result<TrashLocation> {
+    #[cfg(not(all(test, target_os = "macos")))]
     let base = BaseDirs::new().context("cannot determine home directory")?;
     #[cfg(target_os = "macos")]
     {
+        let _ = source;
+        #[cfg(not(test))]
         let root = base.home_dir().join(".Trash");
+        // Unit tests must never use the account's real trash directory.
+        #[cfg(test)]
+        let root = crate::config::data_dir()?.join("test-trash");
         fs::create_dir_all(&root)?;
-        return Ok(TrashLocation {
+        Ok(TrashLocation {
             root,
             kind: TrashKind::Macos,
-        });
+        })
     }
     #[cfg(target_os = "linux")]
     {
@@ -100,6 +111,7 @@ pub fn locate_trash(source: &Path) -> Result<TrashLocation> {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn create_private_path(path: &Path) -> Result<()> {
     if path.exists() {
         return Ok(());
@@ -119,6 +131,7 @@ fn create_private_path(path: &Path) -> Result<()> {
     Ok(())
 }
 
+#[cfg(target_os = "linux")]
 fn safe_user_directory(path: &Path, uid: u32) -> bool {
     fs::symlink_metadata(path).is_ok_and(|metadata| {
         metadata.is_dir()
@@ -128,6 +141,7 @@ fn safe_user_directory(path: &Path, uid: u32) -> bool {
     })
 }
 
+#[cfg(target_os = "linux")]
 fn ensure_user_trash(root: &Path, uid: u32) -> Result<()> {
     for directory in [root.to_path_buf(), root.join("files"), root.join("info")] {
         if !directory.exists() {
@@ -141,6 +155,7 @@ fn ensure_user_trash(root: &Path, uid: u32) -> Result<()> {
     Ok(())
 }
 
+#[cfg(target_os = "linux")]
 fn valid_shared_trash(path: &Path) -> bool {
     fs::symlink_metadata(path).is_ok_and(|metadata| {
         metadata.is_dir() && !metadata.file_type().is_symlink() && metadata.mode() & 0o1000 != 0

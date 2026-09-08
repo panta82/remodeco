@@ -516,6 +516,7 @@ pub fn operation_counts(operations: &[Operation]) -> (usize, usize) {
 mod tests {
     use super::*;
     use crate::config::{EditorMode, PlanFormat};
+    #[cfg(target_os = "linux")]
     use std::os::unix::fs::PermissionsExt;
     use std::sync::Mutex;
 
@@ -724,12 +725,16 @@ mod tests {
             .find_map(|step| step.trash_restore_key.as_ref())
             .unwrap();
         assert!(Path::new(&key.files_path).exists());
-        assert!(Path::new(key.info_path.as_ref().unwrap()).exists());
+        if let Some(info_path) = &key.info_path {
+            assert!(Path::new(info_path).exists());
+        }
 
         let undo = undo_session(&mut opened.session, &mut ui).unwrap();
         assert_eq!(undo.final_status, Some(JournalFinalStatus::Undone));
         assert_eq!(fs::read_to_string(&source).unwrap(), "music");
-        assert!(!Path::new(key.info_path.as_ref().unwrap()).exists());
+        if let Some(info_path) = &key.info_path {
+            assert!(!Path::new(info_path).exists());
+        }
     }
 
     #[test]
@@ -1016,6 +1021,7 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "linux")]
     fn poison_home_trash(temp: &tempfile::TempDir) {
         let trash = temp.path().join("xdg/Trash");
         fs::create_dir_all(trash.join("files")).unwrap();
@@ -1025,6 +1031,7 @@ mod tests {
         }
     }
 
+    #[cfg(target_os = "linux")]
     fn plan_trashes(root: &Path, names: &[&str]) -> (OpenedSession, Vec<PathBuf>) {
         fs::create_dir(root).unwrap();
         let mut paths = Vec::new();
@@ -1044,6 +1051,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "linux")]
     fn unsafe_trash_can_permanently_delete() {
         let _guard = ENV_LOCK.lock().unwrap();
         let temp = tempfile::tempdir().unwrap();
@@ -1072,6 +1080,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "linux")]
     fn unsafe_trash_skip_keeps_the_file() {
         let _guard = ENV_LOCK.lock().unwrap();
         let temp = tempfile::tempdir().unwrap();
@@ -1099,6 +1108,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "linux")]
     fn unsafe_trash_all_deletes_remaining() {
         let _guard = ENV_LOCK.lock().unwrap();
         let temp = tempfile::tempdir().unwrap();

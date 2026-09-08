@@ -85,10 +85,13 @@ Run `remodeco --help` for scanning, editor, copy, and session options.
 
 ### Version history
 
-**1.0.0** -
-*2026-09-08*:
+**1.0.0** - `2026-09-08`:
 
 Project revived, rewritten in Rust, and released with a new plan format.
+
+**0.0.0** - `2017-12-29`:
+
+Initial prototype in node.js.
 
 ### License
 

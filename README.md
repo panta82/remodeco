@@ -1,11 +1,13 @@
 # remodeco
 
-**RE**move  
-**MO**dify  
-**DE**lete  
-**CO**py
+🆁🅴🄼🄾🅅🄴  
+🅼🅾🄳🄸🄵🅈  
+🅳🅴🄻🄴🅃🄴  
+🅲🅾🄿🅈  
 
-Here's how it works:
+...your files in a text editor.
+
+### Here's how it works:
 
 1️⃣ Run `remodeco ~/Pictures`
 

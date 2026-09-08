@@ -14,9 +14,9 @@
 2️⃣ A `.properties` plan file opens in your editor:
 
 ```properties
-F01	:	/home/joesmith/Pictures/mom.jpg
-F02	:	/home/joesmith/Pictures/dad.jpg
-F03	:	/home/joesmith/Pictures/sis.jpg
+F1	:	/home/joesmith/Pictures/dad.jpg
+F2	:	/home/joesmith/Pictures/mom.jpg
+F3	:	/home/joesmith/Pictures/sis.jpg
 ``` 
 
 3️⃣ Edit the file

@@ -1,75 +1,97 @@
-# Rust rewrite architecture
+# Architecture
 
-This branch replaces the Node/Ink implementation with one Rust executable while
-preserving the `rewrite` branch's Markdown plan and JSON session formats.
+Remodeco is a Rust executable for Linux and macOS. It scans files into an
+editable plan, previews the requested changes, then executes them through a
+persistent journal. See [README.md](README.md) for usage and plan editing rules.
 
-## Terminal and diff decision
+## Session flow and storage
 
-Remodeco uses Ratatui with Crossterm, the same basic terminal stack used by the
-Rust Codex and Grok CLIs. The confirmation view is a **fullscreen** TUI on the
-terminal's alternate screen (`smcup` / `rmcup`), the same model as `htop`,
-`less`, and GNU `dialog`. While the preview is open it owns the whole visible
-window; on exit, panic, or re-opening the editor, it leaves the alternate
-screen and restores the previous terminal contents.
+`main` handles CLI dispatch; `controller` coordinates session creation, plan
+validation, execution, and undo. A new session records the original paths and
+metadata fingerprints in a manifest. Opening an existing session takes its lock
+before loading it.
 
-The preview is not a source-code unified diff. It compares an original path with
-an edited destination. `similar` supplies a Myers sequence diff over path-aware
-tokens, rendered as a single inline line (red/strikethrough deletions next to
-green insertions). Files are grouped under blue directory headers, with
-zero-padded numeric prefixes aligned to the plan's id width. Styling is
-restricted to basic colors, bold, dim, and strikethrough, and is disabled by
-`NO_COLOR`.
+The normal flow opens the plan in an editor, then enters the confirmation TUI.
+The TUI polls for saved edits and reloads the preview. Confirmation captures the
+session revision, mode, and plan hash; execution rejects changes made after
+confirmation. `--dry-run` prints the validated schedule after the editor step.
+The `execute` subcommand executes a saved plan or resumes an interrupted
+execution without opening the editor or preview.
 
-Myers runs when the plan is loaded or reloaded, not on every frame. The TUI
-keeps those styled lines and paints only the viewport, so large change sets
-stay responsive. Search (`/`, `n`/`N`) and filter (`f`) are view-only; execute
-still applies the whole plan. Movement follows pager conventions (`j`/`k`,
-`g`/`G`, Home/End, `Ctrl-d`/`u`, arrows, mouse wheel).
+Sessions live under `sessions/<id>/` in the platform data directory, which
+`REMODECO_DATA_DIR` can override. Each contains `session.json`, `manifest.json`,
+an editable plan, a `session.lock`, and journal files. `model` defines the
+serialized records; `store`, `atomic`, and `lock` handle persistence and locking.
 
-References used for the decision:
+The default plan is `plan.properties`, with entries written as
+`F<id><tab>:<tab>/destination/path` and directory labels written as `#` comments.
+Three metadata lines prefixed with `#> ` identify the format version, session,
+and root. The parser reads these before ordinary comments. Root paths are stored
+verbatim without quotes. The
+`--format yaml` and `--format plain-text` options change the filename to
+`plan.yaml` or `plan.txt`; all three use the same line-oriented content and parser.
 
-- [Codex Rust workspace overview](https://github.com/openai/codex/blob/main/codex-rs/README.md)
-  identifies Ratatui as its TUI framework.
-- [Codex diff renderer](https://github.com/openai/codex/blob/main/codex-rs/tui/src/diff_render.rs)
-  uses Ratatui spans and `diffy` for full unified source diffs.
-- [Grok Build](https://github.com/xai-org/grok-build) is likewise a Rust
-  Ratatui/Crossterm application designed around a full-screen agent UI.
-- [Ratatui viewport documentation](https://docs.rs/ratatui/latest/ratatui/enum.Viewport.html)
-  defines `Fullscreen` as the default viewport for an application that owns the
-  terminal window.
 
-If raw mode or the alternate screen cannot be entered, Remodeco falls back to a
-line-oriented prompt with the same execute/editor/cancel flow.
+## Terminal preview
 
-## Modules
+The confirmation view uses Ratatui with Crossterm on the terminal's alternate
+screen. It owns the visible window while open and restores the terminal on
+normal exit, panic, or re-opening the editor. If terminal setup fails, it falls
+back to a line-oriented execute/editor/reset/cancel prompt.
 
-- `plan`: generate and strictly parse the line-oriented plan
-  (`F0001<tab>:<tab>/path`, `#` comments). Default file is `plan.properties`;
-  `--format yaml` / `--format plain-text` write `plan.yaml` / `plan.txt`.
-  Draft sessions on another extension are migrated on resume.
-- `scan`: deterministic filesystem scan plus source fingerprints.
-- `session`: compatible session, manifest, journal, locking, and atomic storage.
-- `schedule`: validate operations and order mkdir/stage/commit/copy/trash steps.
-- `execute`: journal-before-mutation execution, desktop trash, empty source
-  directory cleanup, and undo.
-- `editor`: editor discovery and GUI/multiplexer/attached editor lifecycle.
-- `tui`: fullscreen alternate-screen shell (event loop, keys, execute/cancel/re-open).
-  The virtualized change list lives in `tui/preview.rs`.
+`diff` uses `similar` to compute a Myers sequence diff over path-aware tokens.
+The preview renders deletions in red with strikethrough beside green insertions,
+with files grouped under directory headers and numeric prefixes aligned to the
+plan's ID width. `NO_COLOR` disables colors; text modifiers remain.
 
-## Safety invariants
+`tui/preview` caches styled lines when the plan loads or changes, and renders
+only the viewport. Search and filter affect the view; execution still applies
+the whole plan. The view supports vertical and horizontal scrolling. Reset
+regenerates the original plan from the manifest and is limited to draft sessions
+without an active journal.
 
-- Plans are parsed, never evaluated as shell.
-- Sources are fingerprinted at scan time and checked immediately before mutation.
-  A changed file offers proceed / skip / all / quit. A missing file offers
-  skip / all / quit (all skips remaining missing sources). If trash cannot
-  be used, the TTY offers permanent delete / skip / all / quit.
-- Renames and copies are no-clobber operations.
-- After a move or trash, empty source directories under the session root are
-  removed with `rmdir` (never recursive). The session root itself is kept.
-  Undo recreates parents when restoring files.
+## Module responsibilities
+
+| Module | Responsibility |
+| --- | --- |
+| `main`, `cli`, `config` | Command dispatch, arguments, configuration, and platform paths. |
+| `controller` | Session lifecycle, confirmation checks, scheduling, execution, and inverse journals for undo. |
+| `model` | Session, manifest, operation, schedule, and journal types. |
+| `scan` | Deterministic filesystem scan, exclusions, and metadata fingerprints. |
+| `plan` | Plan generation, parsing, header validation, hashes, and operation classification. |
+| `store`, `atomic`, `lock` | Session files, atomic writes, and advisory locks. |
+| `schedule` | Destination validation and ordering of trash, mkdir, stage, commit, and copy steps. |
+| `execute` | Journal execution, interrupted-step reconciliation, source checks, and empty source directory cleanup. |
+| `native`, `trash` | Platform filesystem operations and desktop trash handling. |
+| `editor` | Editor discovery and GUI, multiplexer, or attached editor lifecycle. |
+| `diff`, `tui`, `tui/preview` | Path differences, terminal lifecycle, input, and preview rendering. |
+| `util` | Shared time and path helpers. |
+
+## Execution safeguards and limits
+
+- Plans are parsed, never evaluated as shell. IDs refer back to the manifest;
+  editing a destination does not change the recorded source.
+- Source fingerprints use filesystem metadata, not file content hashes. The
+  executor checks them before mutation. A changed source offers proceed / skip /
+  all / quit; a missing source offers skip / all / quit. For missing sources,
+  all skips the remaining missing sources.
+- Scheduling rejects duplicate destinations and conflicting existing paths.
+  Move cycles use temporary sibling paths. Native renames and copies refuse to
+  overwrite an existing destination. Cross-filesystem renames fail; there is no
+  copy-and-delete fallback for moves.
 - Destination parent identity is captured while scheduling and checked while
   executing, reducing the window for symlink or directory-swap races.
-- Every step is persisted before and after mutation; interrupted runs remain
-  inspectable and resumable through their journal.
-- A per-session lock prevents concurrent editing and a global execution lock
-  serializes filesystem mutation.
+- The executor persists each scheduled step before and after mutation. It
+  reconciles in-progress steps when resuming an interrupted execution, and
+  requires the plan, revision, and mode to match the journal.
+- A per-session advisory lock prevents concurrent Remodeco editing sessions.
+  A shared execution lock in the data directory serializes execution and undo
+  for sessions using that directory.
+- Trash is the default for empty destinations. If no safe trash location is
+  available, the TTY offers permanent delete / skip / all / quit. Permanent
+  deletion has no undo data.
+- After moves or trash operations, empty source directories under the session
+  root are removed with `rmdir`, never recursively. The session root is kept.
+- Undo builds an inverse journal from a completed execution. It reverses moves,
+  trashes copies, restores items with trash restore records, and recreates
+  missing parents. Resuming an interrupted undo is not supported.

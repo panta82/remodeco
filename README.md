@@ -3,7 +3,7 @@
 **RE**move  
 **MO**dify  
 **DE**lete  
-**CO**py  
+**CO**py
 
 Here's how it works:
 
@@ -41,18 +41,19 @@ Headings are `#` comments and are labels only.
 F01	:	/absolute/path/to/file.txt
 ```
 
-| Edit | Effect |
-| --- | --- |
-| Leave the path unchanged | no operation |
-| Change the full destination path | rename/move (or copy) |
+| Edit                                        | Effect                          |
+|---------------------------------------------|---------------------------------|
+| Leave the path unchanged                    | no operation                    |
+| Change the full destination path            | rename/move (or copy)           |
 | Leave the destination empty after the colon | move to desktop trash or delete |
-| Delete the line or comment it with `Ctrl+/` | skip |
+| Delete the line or comment it with `Ctrl+/` | skip                            |
 
 Default file is `plan.properties`. `--format yaml` writes `plan.yaml`,
 `--format plain-text` writes `plan.txt` (no language highlighting). Same
 choice in config as `"format": "properties"` / `"yaml"` / `"plain-text"`.
-Draft sessions on `plan.md` or another extension are rewritten and moved on
-resume; edits are kept.
+The first three lines start with `#>` and record the format version, session ID,
+and root path.
+Keep them intact; they bind the plan to its session.
 
 ### Configuration
 
@@ -74,4 +75,4 @@ Run `remodeco --help` for scanning, editor, copy, and session options.
 
 ### License
 
-MIT. Ivan Pantic.
+[MIT](LICENSE)

@@ -58,55 +58,22 @@ pub fn id_width_for_count(count: usize) -> usize {
     count.max(1).to_string().len()
 }
 
-pub fn yaml_single_quote(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "''"))
-}
-
-pub fn parse_yaml_single_quoted(value: &str) -> String {
-    let value = value.trim();
-    if value.len() >= 2 && value.starts_with('\'') && value.ends_with('\'') {
-        value[1..value.len() - 1].replace("''", "'")
-    } else {
-        value.to_owned()
-    }
-}
-
 pub fn generate_plan(
     session_id: &SessionId,
     root: &str,
     entries: &[ManifestEntry],
     id_width: usize,
 ) -> String {
-    render_plan(session_id, root, entries, id_width, None)
-}
-
-pub fn render_plan(
-    session_id: &SessionId,
-    root: &str,
-    entries: &[ManifestEntry],
-    id_width: usize,
-    destinations: Option<&HashMap<u64, String>>,
-) -> String {
     let mut out = format!(
-        "---\nremodeco: 1\nid: {session_id}\nroot: {}\n\
+        "#> remodeco: 1\n#> id: {session_id}\n#> root: {root}\n\n\
          # Edit the path after F#### <tab> : <tab> to rename or move.\n\
          # Leave the path unchanged, or delete it, or comment out the line means do nothing.\n\
          # Empty destination means move to trash or delete.\n\
-         # When done, save and return to remodeco (exit the editor if TUI).\n---\n\n\
-         # {root}\n",
-        yaml_single_quote(root)
+         # When done, save and return to remodeco (exit the editor if TUI).\n\n\
+         # {root}\n"
     );
     let mut current_parent: Option<String> = None;
     for entry in entries {
-        let dest = match destinations {
-            Some(map) => {
-                let Some(dest) = map.get(&entry.id) else {
-                    continue;
-                };
-                dest.as_str()
-            }
-            None => entry.from.as_str(),
-        };
         let parent = Path::new(&entry.from)
             .parent()
             .unwrap_or_else(|| Path::new("/"));
@@ -125,6 +92,7 @@ pub fn render_plan(
         out.push_str(&format!(
             "F{:0width$}\t:\t{dest}\n",
             entry.id,
+            dest = entry.from,
             width = id_width
         ));
     }
@@ -133,15 +101,10 @@ pub fn render_plan(
 
 fn is_ignorable_line(line: &str) -> bool {
     let trimmed = line.trim();
-    trimmed.is_empty()
-        || trimmed.chars().all(|c| c == '-')
-        || trimmed.starts_with('#')
-        || trimmed.starts_with('>')
-        || trimmed.starts_with("<!--")
+    trimmed.is_empty() || trimmed.starts_with('#')
 }
 
 /// Line-oriented parse. Entries are `F<digits><tab>:<tab><path>`.
-/// Legacy `F<digits>: <path>` and markdown `- `{01}`` tab lines are still accepted.
 pub fn parse_plan(raw: &str) -> std::result::Result<ParsedPlan, PlanError> {
     if raw.len() > MAX_FILE_BYTES {
         return Err(PlanError::new("plan-too-large", "plan too large"));
@@ -162,45 +125,25 @@ pub fn parse_plan(raw: &str) -> std::result::Result<ParsedPlan, PlanError> {
 
     let mut index = 0;
     let mut header = None;
-    if raw_lines.first() == Some(&"---") {
-        let mut fields = HashMap::new();
-        index = 1;
-        loop {
-            if index >= raw_lines.len() {
-                return Err(PlanError::new("front-matter", "unterminated front matter"));
-            }
-            if raw_lines[index] == "---" {
-                index += 1;
-                break;
-            }
-            let line = raw_lines[index];
-            if !is_ignorable_line(line)
-                && let Some((key, value)) = line.split_once(':')
-            {
-                fields.insert(key.trim().to_owned(), value.trim().to_owned());
-            }
-            index += 1;
-        }
-        let session_id =
-            match SessionId::new(fields.get("id").map(String::as_str).unwrap_or_default()) {
-                Ok(id) => id,
-                Err(_) => {
-                    return Err(PlanError::new(
-                        "front-matter",
-                        "invalid session id in front matter",
-                    ));
-                }
-            };
+    if raw_lines
+        .first()
+        .is_some_and(|line| line.starts_with("#> remodeco:"))
+    {
+        let field = |index: usize, prefix: &str| {
+            raw_lines
+                .get(index)
+                .and_then(|line| line.strip_prefix(prefix))
+                .ok_or_else(|| PlanError::new("header", "invalid plan header"))
+        };
         header = Some(PlanHeader {
-            remodeco: fields
-                .get("remodeco")
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(0),
-            id: session_id,
-            root: parse_yaml_single_quoted(
-                fields.get("root").map(String::as_str).unwrap_or_default(),
-            ),
+            remodeco: field(0, "#> remodeco: ")?
+                .parse()
+                .map_err(|_| PlanError::new("header", "invalid plan version"))?,
+            id: SessionId::new(field(1, "#> id: ")?)
+                .map_err(|_| PlanError::new("header", "invalid session id in plan header"))?,
+            root: field(2, "#> root: ")?.to_owned(),
         });
+        index = 3;
     }
 
     let mut bullets = Vec::new();
@@ -249,12 +192,6 @@ pub fn parse_plan(raw: &str) -> std::result::Result<ParsedPlan, PlanError> {
     })
 }
 
-fn parse_entry_line(text: &str) -> Option<(u64, String)> {
-    parse_tab_colon_entry_line(text)
-        .or_else(|| parse_colon_space_entry_line(text))
-        .or_else(|| parse_markdown_entry_line(text))
-}
-
 fn split_f_id(text: &str) -> Option<(u64, &str)> {
     let rest = text.strip_prefix('F')?;
     let digit_end = rest
@@ -268,29 +205,9 @@ fn split_f_id(text: &str) -> Option<(u64, &str)> {
     Some((id_text.parse().ok()?, after_id))
 }
 
-fn parse_tab_colon_entry_line(text: &str) -> Option<(u64, String)> {
+fn parse_entry_line(text: &str) -> Option<(u64, String)> {
     let (id, rest) = split_f_id(text)?;
     Some((id, rest.strip_prefix("\t:\t")?.to_owned()))
-}
-
-fn parse_colon_space_entry_line(text: &str) -> Option<(u64, String)> {
-    let (id, after_id) = split_f_id(text)?;
-    let after_colon = after_id.strip_prefix(':')?;
-    let destination = if after_colon.is_empty() {
-        String::new()
-    } else {
-        after_colon.strip_prefix(' ')?.to_owned()
-    };
-    Some((id, destination))
-}
-
-fn parse_markdown_entry_line(text: &str) -> Option<(u64, String)> {
-    let rest = text.strip_prefix("- `{")?;
-    let (id_text, destination) = rest.split_once("}`\t")?;
-    if id_text.is_empty() || !id_text.bytes().all(|b| b.is_ascii_digit()) {
-        return None;
-    }
-    Some((id_text.parse().ok()?, destination.to_owned()))
 }
 
 pub fn classify_ops(
@@ -375,9 +292,11 @@ pub fn whole_file_hash(raw: &str) -> String {
 }
 
 pub fn body_hash(raw: &str) -> String {
-    let body = raw
-        .find("\n---\n")
-        .map_or(raw, |position| &raw[position + 5..]);
+    let body = if raw.starts_with("#> remodeco:") {
+        raw.splitn(4, '\n').nth(3).unwrap_or_default()
+    } else {
+        raw
+    };
     sha256_hex(body)
 }
 
@@ -385,13 +304,9 @@ pub fn validate_plan_header(parsed: &ParsedPlan, session_id: &SessionId, root: &
     let header = parsed
         .header
         .as_ref()
-        .ok_or_else(|| PlanError::new("front-matter", "missing front matter"))?;
+        .ok_or_else(|| PlanError::new("header", "missing plan header"))?;
     if header.remodeco != 1 || header.id.as_str() != session_id.as_str() || header.root != root {
-        return Err(PlanError::new(
-            "front-matter",
-            "plan front matter does not match the session",
-        )
-        .into());
+        return Err(PlanError::new("header", "plan header does not match the session").into());
     }
     Ok(())
 }
@@ -433,6 +348,51 @@ mod tests {
     }
 
     #[test]
+    fn header_preserves_root_and_checks_session_identity() {
+        let id = SessionId::new("s").unwrap();
+        let root = "/tmp/It's #1: photos ";
+        let raw = generate_plan(&id, root, &[], 1);
+        assert!(raw.starts_with("#> remodeco: 1\n#> id: s\n#> root: /tmp/It's #1: photos \n"));
+        assert!(!raw.lines().any(|line| line == "---"));
+        let parsed = parse_plan(&raw).unwrap();
+        validate_plan_header(&parsed, &id, root).unwrap();
+        assert!(validate_plan_header(&parsed, &SessionId::new("other").unwrap(), root).is_err());
+        assert!(validate_plan_header(&parsed, &id, "/tmp/other").is_err());
+        assert!(
+            validate_plan_header(
+                &parse_plan(&raw.replace("#> remodeco: 1", "#> remodeco: 2")).unwrap(),
+                &id,
+                root
+            )
+            .is_err()
+        );
+        assert!(parse_plan("#> remodeco: 1\n#> id: s\nF1\t:\t/tmp/a\n").is_err());
+    }
+
+    #[test]
+    fn header_does_not_swallow_entries_or_unknown_lines() {
+        let parsed =
+            parse_plan("#> remodeco: 1\n#> id: s\n#> root: /tmp\nF1\t:\t/tmp/a\nunexpected\n")
+                .unwrap();
+        assert_eq!(parsed.bullets[0].line, 4);
+        assert_eq!(parsed.unknown_lines, vec![(5, "unexpected".into())]);
+    }
+
+    #[test]
+    fn body_hash_ignores_metadata_but_tracks_edits() {
+        let raw = "#> remodeco: 1\n#> id: s\n#> root: /tmp\n\nF1\t:\t/tmp/a\n";
+        assert_eq!(
+            body_hash(raw),
+            body_hash(&raw.replace("id: s", "id: other"))
+        );
+        assert_ne!(
+            whole_file_hash(raw),
+            whole_file_hash(&raw.replace("id: s", "id: other"))
+        );
+        assert_ne!(body_hash(raw), body_hash(&raw.replace("/tmp/a", "/tmp/b")));
+    }
+
+    #[test]
     fn comments_skip_but_comment_text_in_a_path_does_not() {
         let raw = "# F1\t:\t/tmp/skip\nF2\t:\t/tmp/a#b\n";
         let parsed = parse_plan(raw).unwrap();
@@ -445,13 +405,6 @@ mod tests {
     fn missing_tab_colon_tab_is_unknown() {
         let parsed = parse_plan("F1 /tmp/a\nF2:/tmp/b\n").unwrap();
         assert_eq!(parsed.unknown_lines.len(), 2);
-    }
-
-    #[test]
-    fn parses_legacy_colon_space_entries() {
-        let parsed = parse_plan("F1: /tmp/a\nF2:\n").unwrap();
-        assert_eq!(parsed.bullets[0].destination, "/tmp/a");
-        assert_eq!(parsed.bullets[1].kind, BulletKind::Trash);
     }
 
     #[test]
@@ -469,30 +422,6 @@ mod tests {
             vec![&OpKind::Noop, &OpKind::Move, &OpKind::Trash]
         );
         assert_eq!(skipped, vec![4]);
-    }
-
-    #[test]
-    fn trash_accepts_colon_only_or_colon_space() {
-        let parsed = parse_plan("F1\t:\t\nF2:\nF3: \n").unwrap();
-        assert_eq!(parsed.bullets.len(), 3);
-        assert!(
-            parsed
-                .bullets
-                .iter()
-                .all(|bullet| bullet.kind == BulletKind::Trash)
-        );
-    }
-
-    #[test]
-    fn parses_legacy_markdown_plan() {
-        let raw = "---\nremodeco: 1\nid: s\nroot: '/tmp/r'\n---\n\n\
-             > Edit the path after `{id}` (the tab) to **rename/move**.\n\
-             # /tmp/r\n\n## sub\n- `{01}`\t/tmp/r/You've `made` it.mp3\n";
-        let parsed = parse_plan(raw).unwrap();
-        assert!(parsed.unknown_lines.is_empty());
-        assert_eq!(parsed.bullets.len(), 1);
-        assert_eq!(parsed.bullets[0].id, 1);
-        assert_eq!(parsed.bullets[0].destination, "/tmp/r/You've `made` it.mp3");
     }
 
     #[test]

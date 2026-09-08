@@ -6,8 +6,8 @@ use crate::model::{
     PlannedKind, PlannedStep, SessionId, SessionMode, SessionRecord, SessionStats, SessionStatus,
 };
 use crate::plan::{
-    body_hash, classify_ops, generate_plan, id_width_for_count, parse_plan, render_plan,
-    validate_plan_header, whole_file_hash,
+    body_hash, classify_ops, generate_plan, id_width_for_count, parse_plan, validate_plan_header,
+    whole_file_hash,
 };
 use crate::scan::scan_tree;
 use crate::schedule::{ScheduleResult, capture_destination_parent, schedule};
@@ -167,51 +167,6 @@ pub fn reset_session_plan(session: &mut SessionRecord, format: PlanFormat) -> Re
     session.plan_body_diverged = false;
     session.stats.changes = 0;
     Ok(())
-}
-
-/// Move a draft session onto the preferred plan filename, preserving edited destinations.
-pub fn normalize_session_plan(session: &mut SessionRecord, format: PlanFormat) -> Result<bool> {
-    if session.status != SessionStatus::Draft {
-        return Ok(false);
-    }
-    let preferred = format.file_name();
-    let current_name = Path::new(&session.plan_path)
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or_default();
-    let raw = match fs::read_to_string(&session.plan_path) {
-        Ok(raw) => raw,
-        Err(_) => return Ok(false),
-    };
-    let parsed = match parse_plan(&raw) {
-        Ok(parsed) => parsed,
-        Err(_) => return Ok(false),
-    };
-    if parsed.unknown_lines.is_empty() && current_name == preferred {
-        return Ok(false);
-    }
-    if parsed.unknown_lines.is_empty() {
-        if let Err(error) = validate_plan_header(&parsed, &session.id, &session.root) {
-            eprintln!("warning: leaving plan in place ({error})");
-            return Ok(false);
-        }
-        let destinations: HashMap<u64, String> = parsed
-            .bullets
-            .iter()
-            .map(|bullet| (bullet.id, bullet.destination.clone()))
-            .collect();
-        let manifest = read_manifest(&session.id)?;
-        let plan = render_plan(
-            &session.id,
-            &session.root,
-            &manifest.entries,
-            session.id_width,
-            Some(&destinations),
-        );
-        apply_plan(session, &plan, format)?;
-        return Ok(true);
-    }
-    Ok(false)
 }
 
 fn apply_plan(session: &mut SessionRecord, plan: &str, format: PlanFormat) -> Result<()> {

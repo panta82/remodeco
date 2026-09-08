@@ -6,7 +6,7 @@ use remodeco::cli::{Cli, Command};
 use remodeco::config::load_config;
 use remodeco::controller::{
     create_session, delete_session, dry_run, execute_prepared_session, execute_session,
-    normalize_session_plan, open_session, refresh_hashes, undo_session,
+    open_session, refresh_hashes, undo_session,
 };
 use remodeco::editor::launch_editor;
 use remodeco::execute::StdioExecuteUi;
@@ -183,7 +183,6 @@ fn run() -> Result<()> {
         write_session(&mut opened.session)?;
     }
     let config = load_config(Path::new(&opened.session.root), &cli)?;
-    normalize_session_plan(&mut opened.session, config.plan_format)?;
     refresh_hashes(&mut opened.session)?;
     launch_editor(&config, Path::new(&opened.session.plan_path))?;
     refresh_hashes(&mut opened.session)?;

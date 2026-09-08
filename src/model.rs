@@ -367,11 +367,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn reads_typescript_session_shape() {
+    fn reads_session_record() {
         let raw = r#"{
           "id":"s","root":"/tmp/r","mode":"move","status":"execute-interrupted",
           "revision":2,"createdAt":"2026-01-01T00:00:00.000Z","updatedAt":"2026-01-01T00:00:01.000Z",
-          "planPath":"/tmp/s/plan.md","manifestPath":"/tmp/s/manifest.json",
+          "planPath":"/tmp/s/plan.properties","manifestPath":"/tmp/s/manifest.json",
           "generatedWholeFileHash":"sha256:a","wholeFileHash":"sha256:b","bodyHash":"sha256:c",
           "planBodyDiverged":false,"activeJournalId":null,"idWidth":2,"toolVersion":"1.0.0",
           "stats":{"files":1,"symlinks":0,"skippedSpecial":0,"changes":0}
@@ -382,7 +382,7 @@ mod tests {
     }
 
     #[test]
-    fn journal_step_uses_compatible_flat_camel_case_keys() {
+    fn journal_step_uses_flat_camel_case_keys() {
         let step = JournalStep {
             planned: PlannedStep {
                 step_id: "abc".into(),

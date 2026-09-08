@@ -3,7 +3,7 @@ use crate::execute::{ExecuteUi, run_journal};
 use crate::lock::HeldLock;
 use crate::model::{
     Journal, JournalFinalStatus, JournalMode, ManifestEntry, ManifestFile, OpKind, Operation,
-    PlannedKind, PlannedStep, SessionMode, SessionRecord, SessionStats, SessionStatus,
+    PlannedKind, PlannedStep, SessionId, SessionMode, SessionRecord, SessionStats, SessionStatus,
 };
 use crate::plan::{
     body_hash, classify_ops, generate_plan, id_width_for_count, parse_plan, render_plan,
@@ -116,7 +116,7 @@ pub fn create_session(
     Ok(OpenedSession { session, lock })
 }
 
-pub fn open_session(id: &str) -> Result<OpenedSession> {
+pub fn open_session(id: &SessionId) -> Result<OpenedSession> {
     // Check first: taking the lock would create the directory we are about to report on.
     if !session_dir(id)?.exists() {
         bail!("no such session: {id}");
@@ -530,7 +530,7 @@ fn inverse_step(
 
 /// Removes a session and everything under it. This includes `journals/`, so deleting an
 /// executed session gives up the ability to undo it; `force` is required in that case.
-pub fn delete_session(id: &str, force: bool) -> Result<()> {
+pub fn delete_session(id: &SessionId, force: bool) -> Result<()> {
     // Check first: taking the lock would create the directory we are about to report on.
     if !session_dir(id)?.exists() {
         bail!("no such session: {id}");
@@ -666,9 +666,10 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let _restore = isolated_environment(&temp);
 
-        let error = delete_session("no-such-session", false).unwrap_err();
+        let id = SessionId::new("no-such-session").unwrap();
+        let error = delete_session(&id, false).unwrap_err();
         assert_eq!(error.to_string(), "no such session: no-such-session");
-        assert!(!session_dir("no-such-session").unwrap().exists());
+        assert!(!session_dir(&id).unwrap().exists());
     }
 
     #[test]

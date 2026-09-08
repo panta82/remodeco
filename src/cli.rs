@@ -1,14 +1,10 @@
 use crate::config::{EditorMode, PlanFormat};
+use crate::model::SessionId;
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
-/// Session ids name a directory under the session store, so they must stay a single
-/// path component. This is the only place untrusted ids enter remodeco.
-fn parse_session_id(raw: &str) -> Result<String, String> {
-    if raw.is_empty() || raw.contains(['/', '\\']) || raw == "." || raw == ".." {
-        return Err("must be a session id, not a path".to_owned());
-    }
-    Ok(raw.to_owned())
+fn parse_session_id(raw: &str) -> Result<SessionId, String> {
+    SessionId::new(raw)
 }
 
 #[derive(Clone, Debug, Parser)]
@@ -62,7 +58,7 @@ pub struct Cli {
 
     /// Open an existing session.
     #[arg(long, value_name = "ID", value_parser = parse_session_id)]
-    pub session: Option<String>,
+    pub session: Option<SessionId>,
 
     /// Validate and print the schedule without mutating files.
     #[arg(long)]
@@ -89,7 +85,7 @@ pub enum Command {
     /// Delete a session and its undo history.
     Delete {
         #[arg(value_parser = parse_session_id)]
-        session_id: String,
+        session_id: SessionId,
 
         /// Delete even if the session could still be undone.
         #[arg(long)]
@@ -99,13 +95,13 @@ pub enum Command {
     /// Execute a prepared session.
     Execute {
         #[arg(value_parser = parse_session_id)]
-        session_id: String,
+        session_id: SessionId,
     },
 
     /// Undo an executed session.
     Undo {
         #[arg(value_parser = parse_session_id)]
-        session_id: String,
+        session_id: SessionId,
     },
 }
 
@@ -147,7 +143,7 @@ mod tests {
 
         assert!(matches!(
             cli.command,
-            Some(Command::Execute { session_id }) if session_id == "session-123"
+            Some(Command::Execute { session_id }) if session_id.as_str() == "session-123"
         ));
     }
 

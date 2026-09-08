@@ -1,6 +1,6 @@
 use crate::model::{
     DestParentRef, DirectoryIdentity, Journal, JournalFinalStatus, PlannedKind, PlannedStep,
-    SourceKind, StepState,
+    SessionId, SourceKind, StepState,
 };
 use crate::native::{copy_no_replace, rename_no_replace, symlink_no_replace};
 use crate::scan::{directory_identity, fingerprint_from_metadata, lstat_fingerprint};
@@ -125,7 +125,7 @@ impl ExecuteUi for QuietExecuteUi {
 }
 
 pub fn run_journal(
-    session_id: &str,
+    session_id: &SessionId,
     journal: &mut Journal,
     root: &str,
     ui: &mut dyn ExecuteUi,
@@ -485,7 +485,7 @@ fn copied_content_matches(from: &Path, to: &Path, kind: SourceKind) -> Result<bo
 }
 
 fn apply_step(
-    session_id: &str,
+    session_id: &SessionId,
     journal: &mut Journal,
     index: usize,
     verify_source: bool,

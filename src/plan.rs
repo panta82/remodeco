@@ -1,4 +1,4 @@
-use crate::model::{ManifestEntry, OpKind, Operation, SessionMode};
+use crate::model::{ManifestEntry, OpKind, Operation, SessionId, SessionMode};
 use anyhow::Result;
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
@@ -29,7 +29,7 @@ impl PlanError {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PlanHeader {
     pub remodeco: u64,
-    pub id: String,
+    pub id: SessionId,
     pub root: String,
 }
 
@@ -72,7 +72,7 @@ pub fn parse_yaml_single_quoted(value: &str) -> String {
 }
 
 pub fn generate_plan(
-    session_id: &str,
+    session_id: &SessionId,
     root: &str,
     entries: &[ManifestEntry],
     id_width: usize,
@@ -81,7 +81,7 @@ pub fn generate_plan(
 }
 
 pub fn render_plan(
-    session_id: &str,
+    session_id: &SessionId,
     root: &str,
     entries: &[ManifestEntry],
     id_width: usize,
@@ -181,12 +181,22 @@ pub fn parse_plan(raw: &str) -> std::result::Result<ParsedPlan, PlanError> {
             }
             index += 1;
         }
+        let session_id =
+            match SessionId::new(fields.get("id").map(String::as_str).unwrap_or_default()) {
+                Ok(id) => id,
+                Err(_) => {
+                    return Err(PlanError::new(
+                        "front-matter",
+                        "invalid session id in front matter",
+                    ));
+                }
+            };
         header = Some(PlanHeader {
             remodeco: fields
                 .get("remodeco")
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(0),
-            id: fields.get("id").cloned().unwrap_or_default(),
+            id: session_id,
             root: parse_yaml_single_quoted(
                 fields.get("root").map(String::as_str).unwrap_or_default(),
             ),
@@ -371,12 +381,12 @@ pub fn body_hash(raw: &str) -> String {
     sha256_hex(body)
 }
 
-pub fn validate_plan_header(parsed: &ParsedPlan, session_id: &str, root: &str) -> Result<()> {
+pub fn validate_plan_header(parsed: &ParsedPlan, session_id: &SessionId, root: &str) -> Result<()> {
     let header = parsed
         .header
         .as_ref()
         .ok_or_else(|| PlanError::new("front-matter", "missing front matter"))?;
-    if header.remodeco != 1 || header.id != session_id || header.root != root {
+    if header.remodeco != 1 || header.id.as_str() != session_id.as_str() || header.root != root {
         return Err(PlanError::new(
             "front-matter",
             "plan front matter does not match the session",
@@ -413,7 +423,7 @@ mod tests {
             1,
             "/tmp/r/You've `made` Announcement: (Lanu) [2CD] 'Stonephace' #1.mp3",
         )];
-        let raw = generate_plan("s", "/tmp/r", &entries, 2);
+        let raw = generate_plan(&SessionId::new("s").unwrap(), "/tmp/r", &entries, 2);
         assert!(raw.contains("F01\t:\t/tmp/r/You've `made`"));
         assert!(raw.contains("# /tmp/r\n"));
         let parsed = parse_plan(&raw).unwrap();

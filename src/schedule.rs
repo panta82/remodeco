@@ -1,5 +1,6 @@
 use crate::model::{
-    DestParentRef, ManifestEntry, OpKind, Operation, PlannedKind, PlannedStep, SessionMode,
+    DestParentRef, ManifestEntry, OpKind, Operation, PlannedKind, PlannedStep, SessionId,
+    SessionMode,
 };
 use crate::scan::directory_identity;
 use crate::util::path_text;
@@ -20,7 +21,7 @@ pub struct ScheduleResult {
 pub fn schedule(
     mode: SessionMode,
     root: &str,
-    session_id: &str,
+    session_id: &SessionId,
     manifest: &[ManifestEntry],
     operations: &[Operation],
 ) -> ScheduleResult {
@@ -36,7 +37,7 @@ pub fn schedule(
 fn try_schedule(
     mode: SessionMode,
     root: &str,
-    session_id: &str,
+    session_id: &SessionId,
     manifest: &[ManifestEntry],
     operations: &[Operation],
 ) -> Result<ScheduleResult> {
@@ -439,7 +440,7 @@ mod tests {
         let result = schedule(
             SessionMode::Move,
             dir.path().to_str().unwrap(),
-            "s",
+            &SessionId::new("s").unwrap(),
             &manifest,
             &operations,
         );
@@ -473,7 +474,7 @@ mod tests {
         let result = schedule(
             SessionMode::Move,
             dir.path().to_str().unwrap(),
-            "s",
+            &SessionId::new("s").unwrap(),
             &manifest,
             &operations,
         );
@@ -511,7 +512,7 @@ mod tests {
         let result = schedule(
             SessionMode::Move,
             dir.path().to_str().unwrap(),
-            "s",
+            &SessionId::new("s").unwrap(),
             &manifest,
             &operations,
         );
@@ -535,7 +536,7 @@ mod tests {
         let result = schedule(
             SessionMode::Move,
             dir.path().to_str().unwrap(),
-            "s",
+            &SessionId::new("s").unwrap(),
             &manifest,
             &operations,
         );

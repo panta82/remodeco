@@ -1,5 +1,51 @@
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
+use std::fmt;
+use std::str::FromStr;
+
+#[derive(Clone, Debug, Eq, Serialize, Deserialize, PartialEq, Hash, Ord, PartialOrd)]
+#[serde(transparent)]
+pub struct SessionId(String);
+
+impl SessionId {
+    pub fn new(raw: impl Into<String>) -> anyhow::Result<Self, String> {
+        let raw = raw.into();
+        if raw.is_empty() || raw.contains(['/', '\\']) || raw == "." || raw == ".." {
+            return Err("must be a session id, not a path".to_owned());
+        }
+        Ok(Self(raw))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    pub fn into_string(self) -> String {
+        self.0
+    }
+}
+
+impl fmt::Display for SessionId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl AsRef<str> for SessionId {
+    fn as_ref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl FromStr for SessionId {
+    type Err = String;
+
+    fn from_str(s: &str) -> anyhow::Result<Self, Self::Err> {
+        Self::new(s)
+    }
+}
+
+// *************************************************************************************************
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -16,6 +62,8 @@ impl std::fmt::Display for SessionMode {
         })
     }
 }
+
+// *************************************************************************************************
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "kebab-case")]
@@ -57,6 +105,8 @@ impl std::fmt::Display for SessionStatus {
         f.write_str(value.as_str().ok_or(std::fmt::Error)?)
     }
 }
+
+// *************************************************************************************************
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct SourceFingerprint {
@@ -103,7 +153,7 @@ pub struct ManifestEntry {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ManifestFile {
-    pub session_id: String,
+    pub session_id: SessionId,
     pub root: String,
     pub entries: Vec<ManifestEntry>,
 }
@@ -120,7 +170,7 @@ pub struct SessionStats {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionRecord {
-    pub id: String,
+    pub id: SessionId,
     pub root: String,
     pub mode: SessionMode,
     pub status: SessionStatus,

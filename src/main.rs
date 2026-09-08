@@ -53,7 +53,7 @@ fn run() -> Result<()> {
                                 .unwrap_or("".to_string());
 
                             table.add_row(vec![
-                                session.id,
+                                session.id.into_string(),
                                 session.status.to_string(),
                                 session.root,
                                 date_str,
@@ -62,7 +62,7 @@ fn run() -> Result<()> {
                         }
                         Err(_) => {
                             table.add_row(vec![
-                                id,
+                                id.into_string(),
                                 "corrupted".to_string(),
                                 "".to_string(),
                                 "".to_string(),
